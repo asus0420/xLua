@@ -1225,10 +1225,6 @@ LUA_API void* xlua_gl(lua_State *L) {
 	return G(L);
 }
 
-static void test() {
-
-}
-
 static const luaL_Reg xlualib[] = {
 	{"sethook", profiler_set_hook},
 	{"genaccessor", gen_css_access},
