@@ -11,13 +11,19 @@ if exist "%__VSWhere%" (
 	for /f "tokens=*" %%p in (
 		'"%__VSWhere%" -latest -property catalog_productDisplayVersion'
 	) do set __VSVER=%%p
-	
+
 )
-if "%__VSVER%" neq "" (	
+if "%__VSVER%" neq "" (
 	set __VS=Visual Studio %__VSVER:~0,2% %__VSDisplay%
 )
 
+if exist build64 (
+    echo Removing old build64 directory...
+    rmdir /s /q build64
+)
+
 mkdir build64 & pushd build64
+@REM cmake -G "%__VS%" -A x64 -DBUILD_DEBUG_ENV=ON ..
 cmake -G "%__VS%" -A x64 ..
 popd
 cmake --build build64 --config Release

@@ -4,7 +4,7 @@
 # http://opensource.org/licenses/MIT
 # Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.10)
 
 if ( WIN32 AND NOT CYGWIN AND NOT ( CMAKE_SYSTEM_NAME STREQUAL "WindowsStore" ) AND NOT ANDROID)
 	set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /MT" CACHE STRING "")
@@ -24,9 +24,10 @@ option ( UINT_ESPECIALLY "using custom ulong" OFF )
 option ( USING_LUAJIT "using luajit" OFF )
 option ( GC64 "using gc64" OFF )
 option ( LUAC_COMPATIBLE_FORMAT "compatible format" OFF )
+option ( BUILD_DEBUG_ENV "Build with debug environment code" OFF)
 
 find_path(XLUA_PROJECT_DIR NAMES SConstruct
-    PATHS 
+    PATHS
     ${CMAKE_SOURCE_DIR}
     NO_DEFAULT_PATH
     )
@@ -40,8 +41,23 @@ endif()
 set(LUA_SRC_PATH lua-${LUA_VERSION}/src)
 set(LUAJIT_SRC_PATH luajit-2.1.0b3/src)
 
+#begin custom xlua extension
+set(LUA_EXTENSION
+        luaextension/lua_memory_tool.c
+)
+if (BUILD_DEBUG_ENV)
+    list(APPEND LUA_EXTENSION luaextension/log.h luaextension/log.c)
+    # fix: XLua is the *project* name, not a CMake target. Also at this point the
+    # target hasn't been created yet (add_library happens later), so calling
+    # target_compile_definitions() here fails. Define the macro at directory/source level.
+    add_compile_definitions(BUILD_DEBUG_ENV)
+endif ()
+set_property(SOURCE ${LUA_EXTENSION} APPEND PROPERTY COMPILE_DEFINITIONS LUA_LIB)
+set(THIRDPART_SRC ${THIRDPART_SRC} ${LUA_EXTENSION})
+#end custom xlua extension
+
 if (USING_LUAJIT)
-	
+
     if (APPLE AND NOT IOS AND NOT ANDROID)
 	    include_directories(
 		  ${CMAKE_SOURCE_DIR}
@@ -50,10 +66,10 @@ if (USING_LUAJIT)
 		  ${CMAKE_CURRENT_BINARY_DIR}
 		  ${THIRDPART_INC}
 	    )
-	    set ( LUA_CORE lua-5.1.5/src/lapi.c lua-5.1.5/src/lcode.c lua-5.1.5/src/ldebug.c lua-5.1.5/src/ldo.c lua-5.1.5/src/ldump.c lua-5.1.5/src/lfunc.c 
-          lua-5.1.5/src/lgc.c lua-5.1.5/src/llex.c lua-5.1.5/src/lmem.c lua-5.1.5/src/lobject.c lua-5.1.5/src/lopcodes.c lua-5.1.5/src/lparser.c lua-5.1.5/src/lstate.c 
-          lua-5.1.5/src/lstring.c lua-5.1.5/src/ltable.c lua-5.1.5/src/ltm.c lua-5.1.5/src/lundump.c lua-5.1.5/src/lvm.c lua-5.1.5/src/lzio.c lua-5.1.5/src/lauxlib.c 
-          lua-5.1.5/src/lbaselib.c lua-5.1.5/src/ldblib.c lua-5.1.5/src/liolib.c lua-5.1.5/src/lmathlib.c lua-5.1.5/src/loslib.c lua-5.1.5/src/ltablib.c 
+	    set ( LUA_CORE lua-5.1.5/src/lapi.c lua-5.1.5/src/lcode.c lua-5.1.5/src/ldebug.c lua-5.1.5/src/ldo.c lua-5.1.5/src/ldump.c lua-5.1.5/src/lfunc.c
+          lua-5.1.5/src/lgc.c lua-5.1.5/src/llex.c lua-5.1.5/src/lmem.c lua-5.1.5/src/lobject.c lua-5.1.5/src/lopcodes.c lua-5.1.5/src/lparser.c lua-5.1.5/src/lstate.c
+          lua-5.1.5/src/lstring.c lua-5.1.5/src/ltable.c lua-5.1.5/src/ltm.c lua-5.1.5/src/lundump.c lua-5.1.5/src/lvm.c lua-5.1.5/src/lzio.c lua-5.1.5/src/lauxlib.c
+          lua-5.1.5/src/lbaselib.c lua-5.1.5/src/ldblib.c lua-5.1.5/src/liolib.c lua-5.1.5/src/lmathlib.c lua-5.1.5/src/loslib.c lua-5.1.5/src/ltablib.c
           lua-5.1.5/src/lstrlib.c lua-5.1.5/src/linit.c lua-5.1.5/src/loadlib.c)
 	else ()
 	    include_directories(
@@ -103,7 +119,7 @@ set ( LUA_SOCKET
     luasocket/select.c
     luasocket/tcp.c
     luasocket/timeout.c
-    luasocket/udp.c 
+    luasocket/udp.c
 )
 
 if ( WIN32 AND NOT CYGWIN )
@@ -201,6 +217,7 @@ endif ( )
 
 if ( WIN32 AND NOT CYGWIN )
     target_compile_definitions (xlua PRIVATE LUA_BUILD_AS_DLL)
+    target_compile_options (xlua PRIVATE /utf-8) # 统一按 UTF-8 解析源码，避免 C4819 编码告警
 endif ( )
 
 if (GC64 AND USING_LUAJIT)
@@ -221,18 +238,18 @@ set_property(
 if(UINT_ESPECIALLY)
     ADD_DEFINITIONS(-DUINT_ESPECIALLY)
 endif()
-	
+
 if ( WIN32 AND NOT CYGWIN )
     if (USING_LUAJIT)
         target_link_libraries(xlua
             ${CMAKE_SOURCE_DIR}/${LUAJIT_SRC_PATH}/lua51.lib
             ws2_32
-            ${THIRDPART_LIB} 
+            ${THIRDPART_LIB}
         )
     else ()
         target_link_libraries(xlua
             ws2_32
-            ${THIRDPART_LIB} 
+            ${THIRDPART_LIB}
         )
     endif()
 else ( )
@@ -240,12 +257,12 @@ else ( )
 		target_link_libraries(xlua
 			${CMAKE_SOURCE_DIR}/${LUAJIT_SRC_PATH}/libluajit.a
 			m
-            ${THIRDPART_LIB} 
+            ${THIRDPART_LIB}
 		)
     else ()
         target_link_libraries(xlua
             m
-            ${THIRDPART_LIB} 
+            ${THIRDPART_LIB}
         )
     endif()
 endif ( )
