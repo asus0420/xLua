@@ -43,13 +43,15 @@ set(LUAJIT_SRC_PATH luajit-2.1.0b3/src)
 
 #begin custom xlua extension
 set(LUA_EXTENSION
-        luaextension/lua_memory_tool.c
+        luaextension/unity_native_helper.c
 )
+
+if ( WIN32 AND NOT CYGWIN )
+    list(APPEND LUA_EXTENSION luaextension/lua_memory_tool.c)
+endif ()
+
 if (BUILD_DEBUG_ENV)
     list(APPEND LUA_EXTENSION luaextension/log.h luaextension/log.c)
-    # fix: XLua is the *project* name, not a CMake target. Also at this point the
-    # target hasn't been created yet (add_library happens later), so calling
-    # target_compile_definitions() here fails. Define the macro at directory/source level.
     add_compile_definitions(BUILD_DEBUG_ENV)
 endif ()
 set_property(SOURCE ${LUA_EXTENSION} APPEND PROPERTY COMPILE_DEFINITIONS LUA_LIB)
