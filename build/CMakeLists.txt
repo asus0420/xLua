@@ -44,6 +44,7 @@ set(LUAJIT_SRC_PATH luajit-2.1.0b3/src)
 #begin custom xlua extension
 set(LUA_EXTENSION
         luaextension/unity_native_helper.c
+        luaextension/lua_table_extend.c
 )
 
 if ( WIN32 AND NOT CYGWIN )

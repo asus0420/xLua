@@ -30,6 +30,8 @@ static int tag = 0;
 static const char *const hooknames[] = {"call", "return", "line", "count", "tail return"};
 static int hook_index = -1;
 
+extern void xlua_inject_table(lua_State* L);
+
 LUA_API void *xlua_tag ()
 {
 	return &tag;
@@ -1234,7 +1236,7 @@ static const luaL_Reg xlualib[] = {
 
 LUA_API void luaopen_xlua(lua_State *L) {
 	luaL_openlibs(L);
-
+	xlua_inject_table(L);
 #if LUA_VERSION_NUM >= 503
 	luaL_newlib(L, xlualib);
 	lua_setglobal(L, "xlua");
