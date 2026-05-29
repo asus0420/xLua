@@ -1,8 +1,12 @@
-﻿// Assets/Plugins/iOS/unity_native_helper.c
-#include "lua.h"
+﻿#include "lua.h"
 #include "lauxlib.h"
 #include <stdint.h>
 #include <limits.h>
+
+#if !defined(luaL_newlib)
+#define luaL_newlib(L, l) (lua_newtable(L), luaL_register(L, NULL, l))
+#endif
+
 
 /* =========================================================
  * helpers
