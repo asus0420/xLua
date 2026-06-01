@@ -242,14 +242,15 @@ static int xlua_table_contains(lua_State* L) {
 	while (lua_next(L, 1) != 0) {
 		/* stack: t, key, value */
 		if (lua_rawequal(L, -1, 2)) {     /* 跳过 __eq，原值比较 */
-			lua_pop(L, 2);                /* 清掉 key 和 value */
 			lua_pushboolean(L, 1);
-			return 1;
+			lua_pushvalue(L, -3);         /* 复制 key 到栈顶 */
+			return 2;                     /* 返回 true, key */
 		}
 		lua_pop(L, 1);                    /* 弹 value，key 留给 next */
 	}
 	lua_pushboolean(L, 0);
-	return 1;
+	lua_pushnil(L);
+	return 2;
 }
 
 static const luaL_Reg xlua_table_funcs[] = {
@@ -263,7 +264,7 @@ static const luaL_Reg xlua_table_funcs[] = {
 	{"indexof", xlua_table_indexof},	// 数组段查值
 	{"isarray", xlua_table_isarray},	// table是否为数组，空表为数组
 	{"ismap", xlua_table_ismap},		// table是否为字典，空表为数组
-	{"contains", xlua_table_contains},	// table是否存在某个value
+	{"contains", xlua_table_contains},	// table是否存在某个value，返回 bool 和对应的 key（不存在时返回 false, nil）
 
 	{NULL, NULL}
 };
