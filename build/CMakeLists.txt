@@ -6,14 +6,22 @@
 
 cmake_minimum_required(VERSION 3.10)
 
-if ( WIN32 AND NOT CYGWIN AND NOT ( CMAKE_SYSTEM_NAME STREQUAL "WindowsStore" ) AND NOT ANDROID)
-	set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /MT" CACHE STRING "")
-	set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} /MTd" CACHE STRING "")
-	set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /MT" CACHE STRING "")
-	set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} /MTd" CACHE STRING "")
-endif ()
-
 project(XLua)
+
+if ( MSVC AND NOT ( CMAKE_SYSTEM_NAME STREQUAL "WindowsStore" ) )
+	# 静态运行时：把 CMake 默认的 /MD(d) 换成 /MT(d)，避免追加导致 D9025 覆盖告警
+	# Release 也生成 PDB：/Zi 产生调试信息；/DEBUG 让链接器输出 pdb；
+	# /OPT:REF /OPT:ICF 恢复被 /DEBUG 关闭的 Release 优化
+	foreach(flag_var CMAKE_C_FLAGS_RELEASE CMAKE_CXX_FLAGS_RELEASE)
+		string(REPLACE "/MD" "/MT" ${flag_var} "${${flag_var}}")
+		set(${flag_var} "${${flag_var}} /Zi")
+	endforeach()
+	foreach(flag_var CMAKE_C_FLAGS_DEBUG CMAKE_CXX_FLAGS_DEBUG)
+		string(REPLACE "/MDd" "/MTd" ${flag_var} "${${flag_var}}")
+	endforeach()
+	set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "${CMAKE_SHARED_LINKER_FLAGS_RELEASE} /DEBUG /OPT:REF /OPT:ICF")
+	set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /DEBUG /OPT:REF /OPT:ICF")
+endif ()
 
 if ( IOS )
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fembed-bitcode")
@@ -224,7 +232,9 @@ endif ( )
 
 if ( WIN32 AND NOT CYGWIN )
     target_compile_definitions (xlua PRIVATE LUA_BUILD_AS_DLL)
-    target_compile_options (xlua PRIVATE /utf-8) # 统一按 UTF-8 解析源码，避免 C4819 编码告警
+    if ( MSVC )
+        target_compile_options (xlua PRIVATE /utf-8) # 统一按 UTF-8 解析源码，避免 C4819 编码告警
+    endif ()
 endif ( )
 
 if (GC64 AND USING_LUAJIT)
