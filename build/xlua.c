@@ -31,6 +31,7 @@ static const char *const hooknames[] = {"call", "return", "line", "count", "tail
 static int hook_index = -1;
 
 extern void xlua_inject_table(lua_State* L);
+extern int xlua_msgpack_decode(lua_State* L);
 
 LUA_API void *xlua_tag ()
 {
@@ -1231,6 +1232,7 @@ static const luaL_Reg xlualib[] = {
 	{"sethook", profiler_set_hook},
 	{"genaccessor", gen_css_access},
 	{"structclone", css_clone},
+	{"msgpack_decode", xlua_msgpack_decode},
 	{NULL, NULL}
 };
 
@@ -1244,5 +1246,9 @@ LUA_API void luaopen_xlua(lua_State *L) {
 	luaL_register(L, "xlua", xlualib);
     lua_pop(L, 1);
 #endif
+	/* Keep the existing Lua call name; xlua.msgpack_decode remains available
+	 * when a project-level C# registration replaces this global. */
+	lua_pushcfunction(L, xlua_msgpack_decode);
+	lua_setglobal(L, "xmsgpack_decode");
 }
 
