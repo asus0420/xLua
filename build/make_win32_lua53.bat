@@ -18,7 +18,7 @@ if "%__VSVER%" neq "" (
 )
 
 mkdir build32 & pushd build32
-cmake -G "%__VS%" -A Win32 ..
+cmake -G "%__VS%" -A Win32 -DXLUA_FASTCALL=ON ..
 popd
 cmake --build build32 --config Release
 md plugin_lua53\Plugins\x86

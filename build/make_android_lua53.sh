@@ -18,12 +18,12 @@ function build() {
     ABI=$2
     TOOLCHAIN_ANME=$3
     BUILD_PATH=build.Android.${ABI}
-    cmake -H. -B${BUILD_PATH} -DANDROID_ABI=${ABI} -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=${NDK}/build/cmake/android.toolchain.cmake -DANDROID_NATIVE_API_LEVEL=${API} -DANDROID_TOOLCHAIN=clang -DANDROID_TOOLCHAIN_NAME=${TOOLCHAIN_ANME}
+    cmake -H. -B${BUILD_PATH} -DANDROID_ABI=${ABI} -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=${NDK}/build/cmake/android.toolchain.cmake -DANDROID_NATIVE_API_LEVEL=${API} -DANDROID_TOOLCHAIN=clang -DANDROID_TOOLCHAIN_NAME=${TOOLCHAIN_ANME} -DXLUA_FASTCALL=$4
     cmake --build ${BUILD_PATH} --config Release
     mkdir -p plugin_lua53/Plugins/Android/libs/${ABI}/
     cp ${BUILD_PATH}/libxlua.so plugin_lua53/Plugins/Android/libs/${ABI}/libxlua.so
 }
 
-build android-16 armeabi-v7a arm-linux-androideabi-4.9
-build android-16 arm64-v8a  arm-linux-androideabi-clang
-build android-16 x86 x86-4.9
+build android-16 armeabi-v7a arm-linux-androideabi-4.9 ON
+build android-16 arm64-v8a  arm-linux-androideabi-clang ON
+build android-16 x86 x86-4.9 ON

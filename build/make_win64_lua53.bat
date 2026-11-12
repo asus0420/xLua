@@ -24,7 +24,7 @@ if exist build64 (
 
 mkdir build64 & pushd build64
 @REM cmake -G "%__VS%" -A x64 -DBUILD_DEBUG_ENV=ON ..
-cmake -G "%__VS%" -A x64 ..
+cmake -G "%__VS%" -A x64 -DXLUA_FASTCALL=ON ..
 popd
 cmake --build build64 --config Release
 md plugin_lua53\Plugins\x86_64
