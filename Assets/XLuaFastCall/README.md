@@ -20,7 +20,7 @@
 
 在 public 实例方法上加 [XLua.XLuaFastCall]，类型仍加入 XLua LuaCallCSharp 配置，再执行 XLua/Generate Code。旧的 Editor 字典配置已迁移为方法标记，不同时维护两套选择规则。
 
-支持 int、byte、long、float、double、bool、string，以及底层为 int/byte/short/sbyte/ushort 的枚举；支持 ref/out，最多 8 输入、4 输出。同名重载只标记一个具体签名。optional、params、in、静态和泛型方法不支持。标记不支持的签名时生成直接报错。未标记的方法继续走原 Wrap。
+仅支持 int、byte、long、float、double、bool、string；Vector 和枚举不能出现在参数、ref/out 或返回值签名中，必须使用显式数字接口；支持 ref/out，最多 8 输入、4 输出。同名重载只标记一个具体签名。optional、params、in、静态和泛型方法不支持。标记不支持的签名时生成直接报错。未标记的方法继续走原 Wrap。
 
 业务项目负责创建 XLuaFastCall Lua 表及 _RegisterType 安装接口、启动开关和对象生命周期。本目录不带业务安装脚本、示例回调、测试计数器、Benchmark 或 Diagnostics。
 

@@ -14,8 +14,7 @@ namespace XLuaFastCallEditor {
         static string Q(string s) => "\""+s.Replace("\\","\\\\").Replace("\"","\\\"").Replace("\r","\\r").Replace("\n","\\n")+"\"";
         static string T(Type t) => "global::"+t.FullName.Replace('+','.');
         static Type ValueType(ParameterInfo p) => p.ParameterType.IsByRef ? p.ParameterType.GetElementType() : p.ParameterType;
-        static bool NumberEnum(Type t) => t.IsEnum && new[]{typeof(int),typeof(byte),typeof(short),typeof(sbyte),typeof(ushort)}.Contains(Enum.GetUnderlyingType(t));
-        static bool Supported(Type t) => new[]{typeof(int),typeof(long),typeof(float),typeof(double),typeof(bool),typeof(string),typeof(byte)}.Contains(t) || NumberEnum(t);
+        static bool Supported(Type t) => new[]{typeof(int),typeof(long),typeof(float),typeof(double),typeof(bool),typeof(string),typeof(byte)}.Contains(t);
         // 只收集方法本身的标签，直接保留精确签名，不按方法名重新查找重载。
         static Dictionary<Type, MethodInfo[]> CollectMethods() {
             var config = new Dictionary<Type, MethodInfo[]>();
@@ -31,7 +30,7 @@ namespace XLuaFastCallEditor {
             if(m.IsDefined(typeof(XLua.BlackListAttribute),true))return "XLua BlackList";
             var ps=m.GetParameters();
             if(ps.Any(p=>p.IsOptional || p.IsDefined(typeof(ParamArrayAttribute),false) || (p.IsIn && p.ParameterType.IsByRef)))return "optional/params/in parameters";
-            if((m.ReturnType!=typeof(void)&&!Supported(m.ReturnType)) || ps.Any(p=>!Supported(ValueType(p))))return "unsupported type (use scalar numbers, bool, string, Int32-channel enums)";
+            if((m.ReturnType!=typeof(void)&&!Supported(m.ReturnType)) || ps.Any(p=>!Supported(ValueType(p))))return "unsupported type (only int, byte, long, float, double, bool, string; Vector and enum signatures must use explicit numeric interfaces)";
             if(ps.Count(p=>!p.IsOut)>8)return "more than 8 input slots";
             if((m.ReturnType==typeof(void)?0:1)+ps.Count(p=>p.ParameterType.IsByRef)>4)return "more than 4 output slots";
             return null;
@@ -42,9 +41,9 @@ namespace XLuaFastCallEditor {
             if(t==typeof(bool))return "c.Boolean("+i+")";
             if(t==typeof(float))return "c.Float("+i+")";
             if(t==typeof(double))return "c.StrictNumber("+i+")";
-            return "("+T(t)+")"+(t.IsEnum?"(int)":"")+"c.Integer("+i+")";
+            return "("+T(t)+")"+"c.Integer("+i+")";
         }
-        static string Scalar(Type t,string n) => t.IsEnum ? "(int)"+n : n;
+
         static string Emit(Type type,MethodInfo m,string id) {
             var b=new StringBuilder();
             b.AppendLine("        [AOT.MonoPInvokeCallback(typeof(Callback))]");
@@ -78,12 +77,12 @@ namespace XLuaFastCallEditor {
                     b.AppendLine("                    return 101;");
                     b.AppendLine("                }");
                 }
-                else b.AppendLine("                "+(r.Key==typeof(string)?"fits &= c.ReturnString("+i+", "+r.Value+", ref used);":"c.Return("+i+", "+Scalar(r.Key,r.Value)+");"));
+                else b.AppendLine("                "+(r.Key==typeof(string)?"fits &= c.ReturnString("+i+", "+r.Value+", ref used);":"c.Return("+i+", "+r.Value+");"));
             }
             if(strings && !singleString) {
                 b.AppendLine("                if (!fits)");
                 b.AppendLine("                {");
-                foreach(var r in results)b.AppendLine("                    PushConfigured(L, "+Scalar(r.Key,r.Value)+");");
+                foreach(var r in results)b.AppendLine("                    PushConfigured(L, "+r.Value+");");
                 b.AppendLine("                    return "+(100+results.Count)+";");
                 b.AppendLine("                }");
             }
