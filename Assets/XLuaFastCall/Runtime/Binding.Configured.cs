@@ -3,7 +3,7 @@ using XLua;
 using LuaAPI = XLua.LuaDLL.Lua;
 
 namespace XLuaFastCall {
-    public sealed unsafe partial class Binding {
+    public sealed partial class Binding {
         static void PushConfigured(IntPtr L,string value) => LuaStringCodec.Push(L,value);
         static void PushConfigured(IntPtr L,int value) => LuaAPI.xlua_pushinteger(L,value);
         static void PushConfigured(IntPtr L,long value) => LuaAPI.lua_pushint64(L,value);

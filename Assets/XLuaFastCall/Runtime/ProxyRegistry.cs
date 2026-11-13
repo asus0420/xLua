@@ -55,7 +55,5 @@ namespace XLuaFastCall
             if(slot.Generation==MaxGeneration)return;
             slot.Generation++;slot.Next=free;free=index;
         }
-        // 仅供诊断使用：提取句柄中的槽位编号，不检查有效性。
-        internal static int SlotOf(long handle)=>(int)(handle&SlotMask);
     }
 }

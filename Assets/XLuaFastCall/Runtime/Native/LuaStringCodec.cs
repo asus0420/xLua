@@ -1,7 +1,6 @@
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
-using LuaAPI=XLua.LuaDLL.Lua;
 
 namespace XLuaFastCall
 {
@@ -93,12 +92,19 @@ namespace XLuaFastCall
             return k;
         }
 
-#if (UNITY_IOS || UNITY_IPHONE || UNITY_TVOS || UNITY_WEBGL || UNITY_SWITCH) && !UNITY_EDITOR
-        const string LUADLL="__Internal";
-#else
-        const string LUADLL="xlua";
-#endif
-        [DllImport(LUADLL,CallingConvention=CallingConvention.Cdecl)] static extern void xlua_pushlstring(IntPtr L,byte* str,int size);
+        const string LUADLL=NativeAbi.Library;
+        [DllImport(LUADLL,CallingConvention=CallingConvention.Cdecl)] static extern void lua_pushnil(IntPtr L);
+        [DllImport(LUADLL,CallingConvention=CallingConvention.Cdecl)] static extern int sd_pushlstring(IntPtr L,byte* str,int size);
+        internal sealed class PushException : Exception
+        {
+            internal readonly int Status;
+            internal PushException(int status) { Status=status; }
+        }
+        static void PushBytes(IntPtr L,byte* data,int size)
+        {
+            int status=sd_pushlstring(L,data,size);
+            if(status!=0)throw new PushException(status);
+        }
         // 超出当前调用深度缓冲区的返回值使用共享临时缓冲，从 256 字节按倍数扩容，最多保留 64KB。
         // 更大的字符串使用独立临时块，入栈后释放；lua_pushlstring 会先复制内容，再执行 GC。
         // 因此 GC 期间的嵌套调用可以复用共享缓冲，不会覆盖尚未复制的字符串内容。
@@ -108,9 +114,9 @@ namespace XLuaFastCall
         static int scratchBytes;
         public static void Push(IntPtr L,string v)
         {
-            if(v==null) { LuaAPI.lua_pushnil(L);return; }
+            if(v==null) { lua_pushnil(L);return; }
             int len=v.Length;
-            if(len==0) { byte empty=0;xlua_pushlstring(L,&empty,0);return; }
+            if(len==0) { byte empty=0;PushBytes(L,&empty,0);return; }
             byte* temp=null;
             try {
                 fixed(char* s=v) {
@@ -122,7 +128,7 @@ namespace XLuaFastCall
                         o=Reserve((int)need,n,o,ref temp);
                         n+=Encoding.UTF8.GetBytes(s+n,len-n,o+n,(int)need-n);
                     }
-                    xlua_pushlstring(L,o,n);
+                    PushBytes(L,o,n);
                 }
             } finally { if(temp!=null)Marshal.FreeHGlobal((IntPtr)temp); }
         }

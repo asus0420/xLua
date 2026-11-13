@@ -1,59 +1,61 @@
 # XLuaFastCall
 
-方案 A：C 使用与 Lua 核心一起编译的内部宏读取参数，写入固定宽度 Slot；C# 专属回调读取 Slot、按句柄调用业务方法，再由 C 返回结果。数字与字符串的兼容转换保留原有行为。
+生产实现位于本仓库；TestLua 是验证工程，两套原生库不能互换。原生代码与 XLua 使用同一个 Lua 5.3.5 核心，要求小端、默认 Lua 数值配置，不支持 LuaJIT。
 
-Lua 内部布局仅在 C 中使用；C# 不读取 TValue 或 TString。当前要求 Lua 5.3.5，非 LuaJIT、小端序，并保留原有 Lua 数值配置。
+## 代码结构
 
-## 目录
+- Runtime/Binding.cs：每个 LuaEnv 的生命周期、注册、ResetReceiver。
+- Runtime/Binding.Configured.cs：原 XLua 方法表接入和返回支持。
+- Runtime/ProxyRegistry.cs：对象句柄、代数和类型检查。
+- Runtime/XLuaFastCallAttribute.cs：实例方法上的 [XLua.XLuaFastCall] 标记。
+- Runtime/Native/NativeAbi.cs：共享结构和 ABI 校验。
+- Runtime/Native/CallFrame.cs：参数、结果和异常处理。
+- Runtime/Native/LuaStringCodec.cs：短字符串缓存、UTF-8、返回缓冲。
+- Editor/XLuaFastCallGenerator.cs：XLua Generate Code 扩展。
+- build/luaextension/XLuaFastCall/bridge.c：原生实现。
 
-- Runtime/Binding.cs：生命周期、共享结构校验、参数读取及结果写入。
-- Runtime/Binding.Configured.cs：生成回调的注册支持。
-- Runtime/LuaStringCodec.cs：按内容地址和长度读取字符串，短字符串缓存、UTF-8 编解码及返回缓冲。
-- Runtime/ProxyRegistry.cs：对象句柄分配、查询及释放。
-- Editor/XLuaFastCallAttribute.cs：优化方法配置标记。
-- Editor/XLuaFastCallGenerator.cs：接入 XLua GenCodeMenu，生成专属回调。
-- 仓库根目录 build/luaextension/XLuaFastCall/bridge.c：与 Lua 核心编入同一个原生库。
+指针操作集中在 XLuaFastCall.Native 程序集，仅此 asmdef 开启 unsafe；Binding 和生成回调不使用指针。Native 不依赖 XLua 或 UnityEngine，通过 InternalsVisibleTo 向 Assembly-CSharp 开放内部类型。自定义业务程序集名需要配套修改引用和友元配置。
 
-运行时、生成回调与 XLua 源码需在同一程序集。Assets/csc.rsp 启用 unsafe，不单独建立 asmdef。
+## 配置与生成
 
-## ABI 与生命周期
+在 public 实例方法上加 [XLua.XLuaFastCall]，类型仍加入 XLua LuaCallCSharp 配置，再执行 XLua/Generate Code。旧的 Editor 字典配置已迁移为方法标记，不同时维护两套选择规则。
 
-自定义布局版本为 1002。Slot 固定 16 字节、Cell 固定 32 字节，地址使用 uint64_t / ulong；Frame 的 Receiver 位于首字段，32 位为 24 字节、64 位为 40 字节。编译期断言和初始化时的大小、字段偏移校验共同检查布局。
+支持 int、byte、long、float、double、bool、string，以及底层为 int/byte/short/sbyte/ushort 的枚举；支持 ref/out，最多 8 输入、4 输出。同名重载只标记一个具体签名。optional、params、in、静态和泛型方法不支持。标记不支持的签名时生成直接报错。未标记的方法继续走原 Wrap。
 
-正式接口保持 `new Binding(env)` 和两参数 `sd_open(L, token)`，不包含 SD_VERIFY、计数器、验证入口或 sd_calls。TestLua 带计数版本的原生库不能直接替代本仓库的库，需使用本仓库配套构建产物。
+业务项目负责创建 XLuaFastCall Lua 表及 _RegisterType 安装接口、启动开关和对象生命周期。本目录不带业务安装脚本、示例回调、测试计数器、Benchmark 或 Diagnostics。
 
-旧布局版本的库不能与更新后的 C# 混用。更换原生库后需要重启已加载该库的编辑器或进程。销毁时先 Dispose Binding，再 Dispose LuaEnv。
+输出在 GeneratorConfig.common_path/XLuaFastCall/。旧回调需要重新生成；若旧 Register 签名阻止编译，先移除该生成器拥有的旧文件，再生成，不删除业务源文件或其他生成器的文件。
 
-## 构建
+## ABI 与发布
 
-沿用本仓库 build 目录中的平台脚本，不迁入 TestLua 的 Tools 或独立构建模块。CMake 的 XLUA_FASTCALL 总开关默认 OFF，由以下 Lua 5.3 构建入口显式启用：
+生产 ABI 为 **1004**：Slot 16 字节，Cell 24 字节；Frame 按 Receiver、Cells、Error 排列，64 位 24 字节、32 位 16 字节。Cell 的 Kind/Size 偏移为 8/16。
 
-| 脚本 | 优化架构 | 分发路径 |
-|---|---|---|
-| make_win64_lua53.bat | x64 | build/plugin_lua53/Plugins/x86_64/xlua.dll |
-| make_win32_lua53.bat | x86 | build/plugin_lua53/Plugins/x86/xlua.dll |
-| make_android_lua53.sh | armeabi-v7a、arm64-v8a、x86 | build/plugin_lua53/Plugins/Android/libs/对应架构/libxlua.so |
-| make_ios_lua53.sh | arm64 | build/plugin_lua53/Plugins/iOS/libxlua.a |
+sd_layout(int*) **始终写 12 个 int，保留历史索引**，5、9 两项为零。旧库先写布局才返回版本，不能将查询数组缩成 10 项。版本、大小和字段偏移共同校验。
 
-Android 沿用原 NDK、API 等配置；iOS 需 macOS 和 Xcode。Windows/Android 的 C# 入口使用 xlua，iOS 使用 __Internal。不生成单独的优化动态库，不携带测试计数开关。
+生产入口为 sd_open(L)、sd_install(L,name,callback,kinds,count,handleField)。注册只接受支持的输入类型，并要求参数数量精确匹配。Token、Frame.Count、required/allowExtra、对象/Table 参数分支和测试注册入口已移除。注册直接使用生成的静态委托数组元素，保证取函数指针与保活的是同一委托实例（含 Mono）。
 
-## 项目接入边界
+TestLua ABI 为 **1005**，保留测试所需 Token/Count、扩展类型、可选参数及验证计数；Cell 同为 24 字节。两套库必须与各自 C# 配套。更换库后重启加载它的编辑器/进程。先 Dispose Binding，再 Dispose LuaEnv。
 
-业务项目负责原 XLua 的 LuaCallCSharp 配置、优化方法名单、Lua 安装逻辑和启动开关，以及对象句柄的生命周期。本目录不包含测试用例、示例业务类型、生成的示例回调、Session 或业务配置。
+## 安全边界
 
-生成器输出到 GeneratorConfig.common_path/XLuaFastCall/。同名重载或不支持的签名在 Console 报 Error，不生成该方法的优化入口。枚举常量由原 XLua 导出，优化回调不增加 long/ulong 枚举或名称解析功能。
+- 每层独立 4 KB 缓冲；返回字符串和错误文本复制完成前不释放 depth，防止 GC 重入覆盖。
+- 字符串入栈及异常格式化使用原生受保护调用；Lua 内存错误或 __gc 错误后恢复 depth，再传播原错误。
+- sd_pushlstring 在受保护范围内校验参数，非法输入同时返回 Lua 错误码和错误对象。回调只传播 ERRRUN/ERRMEM/ERRGCMM/ERRERR，拒绝 yield 和其他非法状态。
+- C# 长字符串通过 sd_pushlstring 入栈。它返回错误状态，托管 finally 先释放临时内存，再由回调返回后的 C 传播错误，不从该入口 longjmp 穿过托管帧。
+- CallFrame.Error 不内联；格式化失败写固定 ASCII 文本，保留 Lua 调用者文件/行号。不承诺恢复进程级致命错误。
+- 参数转换可能执行 GC，因此进入业务回调前再次检查关闭状态。
+- Slot 和字符串地址只在当前回调内有效；ref struct 不能替代原生内存生命周期约束。
 
-初始化 Binding 前，项目创建 XLuaFastCall Lua 表并提供 _RegisterType 安装接口，参数依次为原 userdata 元表、类型名、fast 表、方法名列表。关闭优化时不创建 Binding，继续使用原 Wrap。
+正常标量返回不增加受保护调用。短字符串缓存、ASCII/UTF-8 快速路径和最多保留 64 KB 的 scratch 复用保留。多字符串共享当前层缓冲，超出容量才走托管长字符串路径。
 
-## 验证范围
+## userdata 句柄缓存
 
-方案 A 在 TestLua 已完成 Windows x64 的生成、IL2CPP Release 构建、正确性及性能测试，以及 Windows x86 原生库和跨语言 ABI 冒烟验证。这些结果不等于本仓库及业务项目的所有平台验证。
+支持整数句柄及原 XLua Proxy userdata。首次从指定属性（默认 handle）读取正整数句柄并缓存到 uservalue，后续直接读取。getter 重入后重新取得栈地址并核对 uservalue，避免覆盖其他用途。
 
-本仓库于 2026-11-12 完成以下迁移验证：
+uservalue 专用于此缓存，不要通过 Lua debug API 修改。同一 userdata 的所有 FastCall 方法使用同一对象句柄。对象池重新注册后、交给 Lua 前，调用 binding.ResetReceiver(proxy)；多个 LuaEnv 分别清理。过期句柄继续由代数和类型检查拒绝，不在热路径刷新。
 
-- 使用本工程 Unity 响应文件独立编译运行时和 Editor C#，均通过。
-- Windows x64、x86 原生 Release 构建通过，输出在 Temp/PlanAMigration/native-x64、native-x86。
-- 在对应位宽进程中验证 ABI 1002、超过 32 位范围的句柄、混合参数、四返回值、UTF-8 和重复上下文拒绝，均通过。
-- 确认正式库不导出 sd_calls；Android/iOS 脚本语法检查通过。
+## 构建与验证
 
-这些检查未运行本仓库业务回调的完整正确性或性能测试。Android/iOS 尚未构建及真机验证。已有分发目录和 Assets/Plugins 中的旧二进制没有被替换，使用前必须重新构建并部署，不能混用旧库。
+CMake XLUA_FASTCALL 默认 OFF，由 Lua 5.3 平台脚本启用。沿用 make_win64_lua53.bat、make_win32_lua53.bat、make_android_lua53.sh、make_ios_lua53.sh，编入各平台 XLua 库，不生成独立优化库。
+
+本次记录在 TestLua 的 Verification/ProductionSafety/：生产 C# 编译、Windows x86/x64 原生构建及安全测试，TestLua Editor/IL2CPP Release Player 回归和前后性能比较。结果见其中 RESULTS.md。Android/iOS 尚未进行本次构建和真机验证。

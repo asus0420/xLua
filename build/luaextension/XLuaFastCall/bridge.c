@@ -1,4 +1,5 @@
-#include "lauxlib.h"
+﻿#include "lauxlib.h"
+#include "ldo.h"
 #include "lobject.h"
 #include "lstate.h"
 #include "lua.h"
@@ -36,45 +37,42 @@ enum
     L_COUNT
 };
 /* 参数类型来自生成器。常见输入通过内部宏读取，兼容转换回退到公开 API。
-   对象和 LuaTable 保留既有转换规则，支持范围由生成器决定。 */
+   仅支持生成器声明的标量输入。 */
 enum
 {
     T_INTEGER = 1,
-    T_NUMBER = 2,
-    T_OBJECT = 6,
+    T_BOOL = 3,
     T_STRING = 7,
-    T_TABLE = 8
+    T_STRICT_NUMBER = 10
 };
-extern int xlua_tocsobj_safe(lua_State *, int);
+enum
+{
+    R_INTEGER = 1,
+    R_NUMBER = 2,
+    R_BOOL = 3,
+    R_STRING = 6
+};
 typedef struct
 {
-    union
-    {
+    union {
         int64_t i;
         double n;
         uint64_t address;
     };
     int64_t kind;
-    union
-    {
-        float xyz[4];
-        int64_t size;
-    };
+    int64_t size;
 } Cell;
 // 将 64 位句柄置于首位，统一 32 位编译器下的后续字段偏移。
 typedef struct
 {
     int64_t receiver;
-    void *token;
     Cell *cells;
     char *error;
-    int32_t count;
 } Frame;
 /* 独立于 Lua 内存布局的参数单元。标签由本模块定义，长度仅供字符串使用。 */
 typedef struct
 {
-    union
-    {
+    union {
         int64_t i;
         double n;
         uint64_t address;
@@ -86,7 +84,7 @@ typedef struct
 SD_ASSERT(slot_size, sizeof(Slot) == 16);
 SD_ASSERT(slot_tag, offsetof(Slot, tag) == 8);
 SD_ASSERT(slot_length, offsetof(Slot, length) == 12);
-SD_ASSERT(cell_size, sizeof(Cell) == 32);
+SD_ASSERT(cell_size, sizeof(Cell) == 24);
 SD_ASSERT(cell_kind, offsetof(Cell, kind) == 8);
 SD_ASSERT(cell_size_f, offsetof(Cell, size) == 16);
 SD_ASSERT(frame_recv, offsetof(Frame, receiver) == 0);
@@ -101,14 +99,13 @@ enum
 typedef int(SD_CALL *Callback)(lua_State *, const Slot *, Frame *);
 typedef struct
 {
-    void *token;
     int closed, depth;
     char buffers[DEPTH][4096];
 } Context;
 typedef struct
 {
     Callback callback;
-    int count, required, allowExtra, types[INPUTS];
+    int count, types[INPUTS];
 } Method;
 static char key;
 static Context *find(lua_State *L)
@@ -119,6 +116,98 @@ static Context *find(lua_State *L)
     lua_pop(L, 1);
     return c;
 }
+/* 整数入口保持兼容；userdata 只在首次调用读取托管属性。
+   uservalue 专用于句柄缓存，不能覆盖其他库的非整数值。
+   lua_getfield 可能重入/扩栈，调用后不得继续使用先前的 TValue 指针。 */
+static int receiver_of(lua_State *L, int64_t *out)
+{
+    const TValue *h = L->ci->func + 1;
+    TValue v;
+    if (ttisinteger(h))
+    {
+        *out = (int64_t)ivalue(h);
+        return 1;
+    }
+    if (!ttisfulluserdata(h))
+        return 0;
+    getuservalue(L, uvalue(h), &v);
+    if (ttisinteger(&v))
+    {
+        *out = (int64_t)ivalue(&v);
+        return 1;
+    }
+    if (!ttisnil(&v))
+        return luaL_error(L, "XLuaFastCall Proxy uservalue is already in use");
+    lua_getfield(L, 1, lua_tostring(L, lua_upvalueindex(3)));
+    if (lua_isinteger(L, -1) && lua_tointeger(L, -1) > 0)
+    {
+        *out = (int64_t)lua_tointeger(L, -1);
+        /* getter 可能重入并改变 uservalue，不覆盖其他用途的数据。 */
+        h = L->ci->func + 1;
+        getuservalue(L, uvalue(h), &v);
+        if (!ttisnil(&v) && (!ttisinteger(&v) || ivalue(&v) != *out))
+        {
+            lua_pop(L, 1);
+            return luaL_error(L, "XLuaFastCall Proxy uservalue changed during handle lookup");
+        }
+        lua_setuservalue(L, 1);
+        return 1;
+    }
+    lua_pop(L, 1);
+    return 0;
+}
+
+/* 对象池重新注册句柄时调用；不调用 metamethod，不跨 P/Invoke 抛 Lua 错误。 */
+API int sd_reset_receiver(lua_State *L, int index)
+{
+    int kind;
+    if (lua_type(L, index) != LUA_TUSERDATA)
+        return -1;
+    kind = lua_getuservalue(L, index);
+    if (kind != LUA_TNIL && !lua_isinteger(L, -1))
+    {
+        lua_pop(L, 1);
+        return -1;
+    }
+    lua_pop(L, 1);
+    lua_pushnil(L);
+    lua_setuservalue(L, index < 0 ? index - 1 : index);
+    return 0;
+}
+
+/* Only allocating Lua pushes need protection. Catch inside native code so
+   Lua errors cannot jump across a managed callback/PInvoke frame. */
+typedef struct
+{
+    const char *text;
+    int size;
+} StringPush;
+
+static void push_string(lua_State *L, void *data)
+{
+    StringPush *s = (StringPush *)data;
+    /* Validate within the protected call: failure must also leave an error object. */
+    if (s->size < 0 || (!s->text && s->size))
+        luaL_error(L, "XLuaFastCall invalid string buffer");
+    lua_pushlstring(L, s->text, (size_t)s->size);
+}
+
+API int sd_pushlstring(lua_State *L, const char *text, int size)
+{
+    StringPush data;
+    data.text = text;
+    data.size = size;
+    return luaD_pcall(L, push_string, &data, savestack(L, L->top), 0);
+}
+
+static void push_exception(lua_State *L, void *data)
+{
+    /* Preserve the Lua caller's file/line; copy before releasing this depth. */
+    luaL_where(L, 1);
+    lua_pushfstring(L, "XLuaFastCall C# exception: %s", (const char *)data);
+    lua_concat(L, 2);
+}
+
 static int invoke(lua_State *L)
 {
     Context *c = (Context *)lua_touserdata(L, lua_upvalueindex(1));
@@ -132,16 +221,14 @@ static int invoke(lua_State *L)
         return luaL_error(L, "XLuaFastCall binding closed");
     if (c->depth >= DEPTH)
         return luaL_error(L, "XLuaFastCall nesting limit");
-    if (count < m->required + 1 || (!m->allowExtra && count > m->count + 1))
+    if (count != m->count + 1)
         return luaL_error(L, "Wrong argument count");
-    /* 句柄仍要求 Lua 整数，不能把浮点句柄自动窄化。 */
-    {
-        const TValue *h = L->ci->func + 1;
-        if (!ttisinteger(h))
-            return luaL_error(L, "Expected integer Proxy handle");
-        receiver = (int64_t)ivalue(h);
-    }
-    for (i = 0; i < m->count && i + 1 < count; i++)
+    if (!receiver_of(L, &receiver))
+        return luaL_error(L, "Expected integer Proxy handle or Proxy userdata with a valid handle");
+    /* 首次属性 getter 可以回调 Lua/C#，返回后重新确认绑定仍然有效。 */
+    if (c->closed)
+        return luaL_error(L, "XLuaFastCall binding closed during handle lookup");
+    for (i = 0; i < m->count; i++)
     {
         int index = i + 2, t = m->types[i];
         /* 上一轮的转换可能触发 GC 和栈重分配，必须从当前调用帧重新获取地址。 */
@@ -169,26 +256,10 @@ static int invoke(lua_State *L)
             a->length = (int32_t)length;
             a->tag = S_STRING;
         }
-        else if (t == 3)
+        else if (t == T_BOOL)
         {
             a->i = !l_isfalse(o);
             a->tag = S_BOOL;
-        }
-        else if (t == T_OBJECT)
-        {
-            if (ttisnil(o))
-                cells[i].i = -1;
-            else
-            {
-                cells[i].i = xlua_tocsobj_safe(L, index);
-                if (cells[i].i < 0)
-                    return luaL_error(L, "Expected managed object");
-            }
-        }
-        else if (t == T_TABLE)
-        {
-            if (!ttistable(o))
-                return luaL_error(L, "Expected LuaTable");
         }
         else if (ttisinteger(o))
         {
@@ -205,57 +276,93 @@ static int invoke(lua_State *L)
             /* 保持旧转换行为：普通数字允许数字字符串，严格数字由回调拒绝。 */
             if (t == T_INTEGER)
                 cells[i].i = lua_tointeger(L, index);
-            if (t == T_NUMBER)
-                cells[i].n = lua_tonumber(L, index);
         }
     }
+    /* Argument conversion can run __gc and close the binding. */
+    if (c->closed)
+        return luaL_error(L, "XLuaFastCall binding closed during argument conversion");
     d = c->depth++;
-    frame.token = c->token;
     frame.cells = cells;
-    frame.count = count;
     frame.receiver = receiver;
     frame.error = c->buffers[d];
     status = m->callback(L, args, &frame);
-    /* 回调退出时统一恢复深度，错误文本保留到同深度的下一次调用。 */
-    c->depth = d;
-
+    /* Keep this buffer reserved through all result pushes and error formatting.
+       Each allocating push is protected natively, so every Lua error restores depth. */
     if (status < 0)
-        return luaL_error(L, "XLuaFastCall C# exception: %s", c->buffers[d]);
+    {
+        int error;
+        if (status < -1)
+        {
+            c->depth = d;
+            /* Only these encoded failures carry a Lua error object. Reject yield,
+               unknown codes and INT_MIN before decoding the status. */
+            switch (status)
+            {
+            case -1 - LUA_ERRRUN:
+            case -1 - LUA_ERRMEM:
+            case -1 - LUA_ERRGCMM:
+            case -1 - LUA_ERRERR:
+                luaD_throw(L, -1 - status);
+                break;
+            default:
+                return luaL_error(L, "XLuaFastCall invalid callback error status");
+            }
+        }
+        error = luaD_pcall(L, push_exception, frame.error, savestack(L, L->top), 0);
+        c->depth = d;
+        if (error != LUA_OK)
+            luaD_throw(L, error);
+        return lua_error(L);
+    }
     if (status >= 100)
     {
         status -= 100;
+        c->depth = d;
         if (status > OUTPUTS || lua_gettop(L) != count + status)
             return luaL_error(L, "Return stack mismatch");
         return status;
     }
     if (status > OUTPUTS)
+    {
+        c->depth = d;
         return luaL_error(L, "Return stack mismatch");
+    }
     for (i = 0; i < status; i++)
     {
         Cell *v = cells + INPUTS + i;
         switch (v->kind)
         {
-        case 1:
+        case R_INTEGER:
             lua_pushinteger(L, v->i);
             break;
-        case 2:
+        case R_NUMBER:
             lua_pushnumber(L, v->n);
             break;
-        case 3:
+        case R_BOOL:
             lua_pushboolean(L, (int)v->i);
             break;
-        case 6:
+        case R_STRING:
             if (v->address)
-                lua_pushlstring(L, (const char *)(uintptr_t)v->address, (size_t)v->size);
+            {
+                int error = sd_pushlstring(L, (const char *)(uintptr_t)v->address, (int)v->size);
+                if (error != LUA_OK)
+                {
+                    c->depth = d;
+                    luaD_throw(L, error);
+                }
+            }
             else
                 lua_pushnil(L);
             break;
         default:
+            c->depth = d;
             return luaL_error(L, "Unknown return kind");
         }
     }
+    c->depth = d;
     return status;
 }
+
 // 报告自定义结构布局，不再暴露 Lua 私有结构偏移。
 API int sd_layout(int *p)
 {
@@ -266,18 +373,17 @@ API int sd_layout(int *p)
     p[L_CELL] = sizeof(Cell);
     p[L_SLOT_LENGTH] = offsetof(Slot, length);
     p[L_FRAME_CELLS] = offsetof(Frame, cells);
-    p[L_FRAME_COUNT] = offsetof(Frame, count);
+    /* Reserved legacy slots remain zero; sd_layout always writes 12 ints. */
     p[L_FRAME_ERROR] = offsetof(Frame, error);
     p[L_CELL_KIND] = offsetof(Cell, kind);
     p[L_CELL_SIZE] = offsetof(Cell, size);
-    p[L_FRAME_TOKEN] = offsetof(Frame, token);
     p[L_FRAME] = sizeof(Frame);
     p[L_FRAME_RECEIVER] = offsetof(Frame, receiver);
-    return 1002;
+    return 1004;
 }
 
 // 同一 Lua 注册表只允许创建一个上下文；正式入口没有验证参数。
-API int sd_open(lua_State *L, void *token)
+API int sd_open(lua_State *L)
 {
     Context *c;
     const uint16_t one = 1;
@@ -287,33 +393,35 @@ API int sd_open(lua_State *L, void *token)
         return -1;
     c = (Context *)lua_newuserdata(L, sizeof(Context));
     memset(c, 0, sizeof(*c));
-    c->token = token;
     lua_rawsetp(L, LUA_REGISTRYINDEX, &key);
     return 0;
 }
-// 注册闭包，由上下文和方法描述两个 upvalue 保持生命周期。
+// 注册闭包，由上下文、方法描述和句柄属性名三个 upvalue 保持生命周期。
 API int sd_install(lua_State *L, const char *name, Callback callback, const int *types, int count,
-                   int required, int allowExtra)
+                   const char *handleField)
 {
     Context *c = find(L);
     Method *m;
     int i;
-    if (!c || c->closed || c->depth || !callback || count < 0 || count > INPUTS || required < 0 ||
-        required > count || !lua_istable(L, -1))
+    if (!c || c->closed || c->depth || !name || !callback || !handleField || !handleField[0] || count < 0 ||
+        count > INPUTS || (count && !types) || !lua_istable(L, -1))
         return -1;
+    for (i = 0; i < count; i++)
+        if (types[i] != T_INTEGER && types[i] != T_BOOL && types[i] != T_STRING &&
+            types[i] != T_STRICT_NUMBER)
+            return -1;
     lua_rawgetp(L, LUA_REGISTRYINDEX, &key);
     m = (Method *)lua_newuserdata(L, sizeof(Method));
     memset(m, 0, sizeof(*m));
     m->callback = callback;
     m->count = count;
-    m->required = required;
-    m->allowExtra = allowExtra;
     for (i = 0; i < count; i++)
     {
         int t = types[i];
         m->types[i] = t;
     }
-    lua_pushcclosure(L, invoke, 2);
+    lua_pushstring(L, handleField);
+    lua_pushcclosure(L, invoke, 3);
     lua_setfield(L, -2, name);
     return 0;
 }
