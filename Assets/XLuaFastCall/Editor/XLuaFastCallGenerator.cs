@@ -154,19 +154,25 @@ namespace XLuaFastCallEditor {
                 if(UnityEditor.EditorApplication.isCompiling || UnityEditor.EditorUtility.scriptCompilationFailed)
                     throw new InvalidOperationException("Wait for successful script compilation before rebuilding FastCall tags");
                 if(target.TargetType==null || !targetTypes.Add(target.TargetType))throw new ArgumentException("Missing or duplicate auto-tag target type");
-                if(string.IsNullOrWhiteSpace(target.SourcePath))throw new ArgumentException("Auto-tag SourcePath is required");
-                string path=Path.GetFullPath(target.SourcePath);
-                if(!sourcePaths.Add(path))throw new ArgumentException("Each auto-tag source file may be configured only once");
-                byte[] original=File.ReadAllBytes(path);
-                bool hasBom=original.Length>=3 && original[0]==239 && original[1]==187 && original[2]==191;
-                string source=new UTF8Encoding(false,true).GetString(original,hasBom?3:0,original.Length-(hasBom?3:0));
-                MethodInfo[] selected;
-                string rebuilt=XLuaFastCallAutoTags.RebuildSource(target.TargetType,source,target.ConditionSymbol,out selected);
-                sourceEdits.Add(new AutoTagWrite { Path=path, Original=original, Source=source, Rebuilt=rebuilt });
+                var targetMethods = new List<MethodInfo>();
+                foreach(var sourcePath in new[]{target.SourcePath}.Concat(target.AdditionalSourcePaths)) {
+                    if(string.IsNullOrWhiteSpace(sourcePath))throw new ArgumentException("Auto-tag SourcePath is required");
+                    string path=Path.GetFullPath(sourcePath);
+                    if(!sourcePaths.Add(path))throw new ArgumentException("Each auto-tag source file may be configured only once");
+                    byte[] original=File.ReadAllBytes(path);
+                    bool hasBom=original.Length>=3 && original[0]==239 && original[1]==187 && original[2]==191;
+                    string source=new UTF8Encoding(false,true).GetString(original,hasBom?3:0,original.Length-(hasBom?3:0));
+                    MethodInfo[] selected;
+                    string rebuilt=XLuaFastCallAutoTags.RebuildSource(target.TargetType,source,target.ConditionSymbol,out selected);
+                    sourceEdits.Add(new AutoTagWrite { Path=path, Original=original, Source=source, Rebuilt=rebuilt });
+                    targetMethods.AddRange(selected);
+                }
+                if(targetMethods.Distinct().Count()!=targetMethods.Count)
+                    throw new ArgumentException("Auto-tag method matched more than one configured source file: "+target.TargetType);
                 // Current reflection attributes can be stale until domain reload. Use
                 // the exact methods selected during this run for callbacks and Lua alike.
-                if(selected.Length==0)config.Remove(target.TargetType);
-                else config[target.TargetType]=selected;
+                if(targetMethods.Count==0)config.Remove(target.TargetType);
+                else config[target.TargetType]=targetMethods.ToArray();
             }
             var files=new Dictionary<string,string>();var names=new HashSet<string>();
             var luaFiles=new Dictionary<string,string>();

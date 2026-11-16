@@ -16,6 +16,9 @@ namespace XLuaFastCallEditor
         public bool Enabled { get; set; }
         public Type TargetType { get; set; }
         public string SourcePath { get; set; }
+        // Other partial declarations of the same target type. The generator merges
+        // the exact methods from all configured files before emitting callbacks.
+        public readonly List<string> AdditionalSourcePaths = new List<string>();
         public string ConditionSymbol { get; set; }
     }
 }

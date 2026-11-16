@@ -63,20 +63,73 @@ namespace XLuaFastCallEditor
                 string prefix=clean.Substring(line,start-line);
                 bool ownLine=prefix.All(c=>c==' ' || c=='\t');
                 string indent=ownLine?prefix:"";
-                string tag=indent+"[global::XLua.XLuaFastCall]"+newline;
+                string tag=indent+"[XLuaFastCall]"+newline;
                 if(!string.IsNullOrEmpty(conditionSymbol))tag="#if "+conditionSymbol+newline+tag+"#endif"+newline;
                 edits.Add(new Edit {Start=ownLine?line:start,Text=(ownLine?"":newline)+tag});
             }
-            return Apply(clean,edits);
+            string result=Apply(clean,edits);
+            return selected.Length==0?result:EnsureImport(result,conditionSymbol,newline);
         }
 
-        static List<Token> Lex(string source)
+        // Only file-level imports count. A conditional import is reusable when
+        // its simple #if conditions match the configured tag condition.
+        static string EnsureImport(string source,string conditionSymbol,string newline)
+        {
+            var tokens=Lex(source,true);
+            var conditions=new List<bool>();
+            int insertion=0;bool prefix=true;
+            for(int i=0;i<tokens.Count;i++) {
+                var token=tokens[i];string word=token.Text;
+                if(word.StartsWith("#",StringComparison.Ordinal)) {
+                    var directive=Regex.Match(word,@"^#\s*(\w+)\s*(.*)$");
+                    string command=directive.Groups[1].Value;
+                    string expression=directive.Groups[2].Value.Trim();
+                    if(command=="if")conditions.Add(expression=="true" || (!string.IsNullOrEmpty(conditionSymbol) && expression==conditionSymbol));
+                    else if((command=="else" || command=="elif") && conditions.Count>0)conditions[conditions.Count-1]=false;
+                    else if(command=="endif" && conditions.Count>0)conditions.RemoveAt(conditions.Count-1);
+                    if(prefix && conditions.Count==0)insertion=token.End;
+                    continue;
+                }
+                if(word=="extern" && i+1<tokens.Count && tokens[i+1].Text=="alias") {
+                    while(i<tokens.Count && tokens[i].Text!=";")i++;
+                    if(i<tokens.Count && conditions.Count==0)insertion=tokens[i].End;
+                    continue;
+                }
+                prefix=false;
+                bool globalImport=word=="global" && i+1<tokens.Count && tokens[i+1].Text=="using";
+                if(word=="using" || globalImport) {
+                    if(globalImport)i++;
+                    int end=i+1;while(end<tokens.Count && tokens[end].Text!=";")end++;
+                    string import=Join(tokens,i+1,end);
+                    if((import=="XLua" || import=="global::XLua") && conditions.All(c=>c))return source;
+                    if(globalImport && conditions.Count==0 && end<tokens.Count)insertion=tokens[end].End;
+                    i=end;
+                }
+                else break; // namespace, attributes or type declaration
+            }
+            string text="using XLua;"+newline;
+            if(!string.IsNullOrEmpty(conditionSymbol))text="#if "+conditionSymbol+newline+text+"#endif"+newline;
+            // A directive's End excludes its newline; preserve #define/extern order.
+            if(insertion>0) {
+                if(insertion<source.Length && source[insertion]=='\r')insertion++;
+                if(insertion<source.Length && source[insertion]=='\n')insertion++;
+                else text=newline+text;
+            }
+            return source.Insert(insertion,text);
+        }
+
+        static List<Token> Lex(string source,bool includeDirectives=false)
         {
             var result=new List<Token>();
             for(int i=0;i<source.Length;)
             {
                 if(char.IsWhiteSpace(source[i])){i++;continue;}
-                if(source[i]=='#' || (i+1<source.Length && source[i]=='/' && source[i+1]=='/'))
+                if(source[i]=='#') {
+                    int directiveStart=i;while(i<source.Length && source[i]!='\n')i++;
+                    if(includeDirectives)result.Add(new Token {Text=source.Substring(directiveStart,i-directiveStart).TrimEnd('\r'),Start=directiveStart,End=i});
+                    continue;
+                }
+                if(i+1<source.Length && source[i]=='/' && source[i+1]=='/')
                 {while(i<source.Length && source[i]!='\n')i++;continue;}
                 if(i+1<source.Length && source[i]=='/' && source[i+1]=='*')
                 {int end=source.IndexOf("*/",i+2,StringComparison.Ordinal);if(end<0)throw new InvalidOperationException("Unclosed comment");i=end+2;continue;}
