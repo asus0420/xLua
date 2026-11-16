@@ -9,6 +9,7 @@ using UnityEngine;
 
 namespace XLuaFastCallEditor {
     public static class XLuaFastCallGenerator {
+        public static event Action<XLuaFastCallGenerationOptions> Configure;
         const string Header = "// 由 XLuaFastCallEditor.XLuaFastCallGenerator 自动生成，请勿手动修改。\n";
         const string ClassHeader = "using System;\n\nnamespace XLuaFastCall\n{\n    public sealed partial class Binding\n    {\n";
         static string Q(string s) => "\""+s.Replace("\\","\\\\").Replace("\"","\\\"").Replace("\r","\\r").Replace("\n","\\n")+"\"";
@@ -134,8 +135,41 @@ namespace XLuaFastCallEditor {
         }
         [GenCodeMenu]
         public static void Generate() {
+            var options = new XLuaFastCallGenerationOptions();
+            Configure?.Invoke(options);
+            GenerateWithOptions(options);
+        }
+
+        // Explicit entry point for project tools. No native code or runtime ABI changes.
+        public static void GenerateWithOptions(XLuaFastCallGenerationOptions options) {
+            if(options==null)throw new ArgumentNullException(nameof(options));
+            if(Generator.LuaCallCSharp==null)Generator.GetGenConfig(XLua.Utils.GetAllTypes());
             var config = CollectMethods();
+            var sourceEdits = new List<AutoTagWrite>();
+            var targetTypes = new HashSet<Type>();
+            var sourcePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach(var target in options.AutoTagTargets) {
+                if(target==null)throw new ArgumentException("Null auto-tag target");
+                if(!target.Enabled)continue;
+                if(UnityEditor.EditorApplication.isCompiling || UnityEditor.EditorUtility.scriptCompilationFailed)
+                    throw new InvalidOperationException("Wait for successful script compilation before rebuilding FastCall tags");
+                if(target.TargetType==null || !targetTypes.Add(target.TargetType))throw new ArgumentException("Missing or duplicate auto-tag target type");
+                if(string.IsNullOrWhiteSpace(target.SourcePath))throw new ArgumentException("Auto-tag SourcePath is required");
+                string path=Path.GetFullPath(target.SourcePath);
+                if(!sourcePaths.Add(path))throw new ArgumentException("Each auto-tag source file may be configured only once");
+                byte[] original=File.ReadAllBytes(path);
+                bool hasBom=original.Length>=3 && original[0]==239 && original[1]==187 && original[2]==191;
+                string source=new UTF8Encoding(false,true).GetString(original,hasBom?3:0,original.Length-(hasBom?3:0));
+                MethodInfo[] selected;
+                string rebuilt=XLuaFastCallAutoTags.RebuildSource(target.TargetType,source,target.ConditionSymbol,out selected);
+                sourceEdits.Add(new AutoTagWrite { Path=path, Original=original, Source=source, Rebuilt=rebuilt });
+                // Current reflection attributes can be stale until domain reload. Use
+                // the exact methods selected during this run for callbacks and Lua alike.
+                if(selected.Length==0)config.Remove(target.TargetType);
+                else config[target.TargetType]=selected;
+            }
             var files=new Dictionary<string,string>();var names=new HashSet<string>();
+            var luaFiles=new Dictionary<string,string>();
             var install=new StringBuilder(Header+ClassHeader+"        partial void InstallConfigured(ref int installed)\n        {\n");
             int typeIndex=0;
             foreach(var entry in config.OrderBy(k=>k.Key.FullName,StringComparer.Ordinal)) {
@@ -150,6 +184,7 @@ namespace XLuaFastCallEditor {
                 foreach (var method in methods) {
                     ValidateMethod(method);
                 }
+                if(options.LuaOutputDirectory!=null)luaFiles.Add(type.Name+"XLuaFastCall.lua",EmitLua(type,methods));
                 var b=new StringBuilder(Header+ClassHeader);
                 var ids=new List<string>();
                 for(int i=0;i<methods.Count;i++) {
@@ -177,11 +212,45 @@ namespace XLuaFastCallEditor {
             }
             install.AppendLine("        }\n    }\n}");
             files.Add("XLuaFastCallRegister.Generated.cs",install.ToString());
+            string luaOutput=null;
+            if(options.LuaOutputDirectory!=null) {
+                if(string.IsNullOrWhiteSpace(options.LuaOutputDirectory))throw new ArgumentException("LuaOutputDirectory must be null (disabled) or a directory");
+                luaOutput=Path.GetFullPath(options.LuaOutputDirectory);
+            }
+            // Validate every configured type before modifying any business source.
+            foreach(var edit in sourceEdits)
+                if(!File.ReadAllBytes(edit.Path).SequenceEqual(edit.Original))throw new IOException("Auto-tag source changed during generation: "+edit.Path);
             string output=Path.Combine(GeneratorConfig.common_path,"XLuaFastCall");Directory.CreateDirectory(output);
+            if(luaOutput!=null)Directory.CreateDirectory(luaOutput);
+            foreach(var edit in sourceEdits) {
+                if(edit.Source==edit.Rebuilt)continue;
+                bool bom=edit.Original.Length>=3 && edit.Original[0]==239 && edit.Original[1]==187 && edit.Original[2]==191;
+                File.WriteAllText(edit.Path,edit.Rebuilt,new UTF8Encoding(bom));
+            }
             foreach(var file in Directory.GetFiles(output,"*.cs"))
                 if(!files.ContainsKey(Path.GetFileName(file)) && (File.ReadAllText(file).StartsWith(Header,StringComparison.Ordinal) || File.ReadAllText(file).StartsWith("// Generated by XLuaFastCallEditor.XLuaFastCallGenerator.",StringComparison.Ordinal)))File.Delete(file);
             foreach(var file in files)File.WriteAllText(Path.Combine(output,file.Key),file.Value,new UTF8Encoding(false));
+            if(luaOutput!=null) {
+                foreach(var file in Directory.GetFiles(luaOutput,"*XLuaFastCall.lua"))
+                    if(!luaFiles.ContainsKey(Path.GetFileName(file)) && File.ReadAllText(file).StartsWith(LuaHeader,StringComparison.Ordinal))File.Delete(file);
+                foreach(var file in luaFiles)File.WriteAllText(Path.Combine(luaOutput,file.Key),file.Value,new UTF8Encoding(false));
+            }
             Debug.Log("XLuaFastCall Generate finished: "+output);
+        }
+        const string LuaHeader="-- Generated by XLuaFastCallEditor.XLuaFastCallGenerator.\n";
+        static string LuaQuote(string value)=>"\""+value.Replace("\\","\\\\").Replace("\"","\\\"").Replace("\r","\\r").Replace("\n","\\n")+"\"";
+        public static string EmitLua(Type type,IEnumerable<MethodInfo> methods) {
+            if(type==null || methods==null)throw new ArgumentNullException();
+            var b=new StringBuilder(LuaHeader);
+            b.AppendLine("local fast = XLuaFastCall["+LuaQuote(type.Name)+"]");
+            b.AppendLine("return {");
+            foreach(var method in methods.OrderBy(m=>m.Name,StringComparer.Ordinal))
+                b.AppendLine("    ["+LuaQuote(method.Name)+"] = fast["+LuaQuote(method.Name)+"],");
+            b.AppendLine("}");return b.ToString();
+        }
+        sealed class AutoTagWrite {
+            public string Path, Source, Rebuilt;
+            public byte[] Original;
         }
     }
 }

@@ -30,6 +30,14 @@
 
 输出在 GeneratorConfig.common_path/XLuaFastCall/。保留旧 Register(name, callback, kinds, handleField) 重载，已有无默认值回调可继续编译。需要默认参数支持的业务项目再按自身配置生成回调；本次源码同步未执行生成，也未修改本仓库 XLua/Gen。
 
+## 可选项目生成配置
+
+自动标签解析、方法筛选和 Lua 安装列表生成由通用 Editor 代码提供。没有项目配置时仍按已有标签生成 C# 回调。项目通过 XLuaFastCallGenerator.Configure 填写目标类型、源码路径、条件宏和 Lua 输出目录；每个自动标签目标必须显式设置 Enabled=true 才会修改源码，Lua 输出可独立启用。
+
+同一次生成使用自动标签工具返回的精确方法集合生成 C# 回调和 Lua 列表，支持带默认值的声明，无需等待新标签重编译后再运行一次。业务启动开关、Proxy 生命周期和 Lua 安装时机继续由项目负责。
+
+完整配置示例、解析范围及限制见 [Editor/GENERATION-CONFIG.md](Editor/GENERATION-CONFIG.md)。本次只增加 Editor 通用能力，不改变运行时或原生 ABI。
+
 ## ABI 与发布
 
 生产 ABI 为 **1007**：Slot 16 字节，Cell 24 字节；Frame 按 Receiver、Cells、Error、Count、Reserved 排列，Count 为包含 self 的 Lua 实参数量，Reserved 显式补齐以统一 32 位 GCC/MSVC 对齐差异；64 位 Frame 为 32 字节，32 位为 24 字节。Cell 的 Kind/Size 偏移为 8/16。
