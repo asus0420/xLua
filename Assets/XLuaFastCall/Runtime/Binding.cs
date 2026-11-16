@@ -7,12 +7,13 @@ namespace XLuaFastCall
     // 每个 LuaEnv 对应一个优化绑定；原生实现编入 xlua.dll。
     public sealed partial class Binding : IDisposable
     {
+        public const int MaxInputs = NativeAbi.Inputs, MaxOutputs = NativeAbi.Outputs;
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         delegate int Callback(IntPtr L, IntPtr args, IntPtr frame);
         [DllImport(NativeAbi.Library, CallingConvention = CallingConvention.Cdecl)]
         static extern int sd_open(IntPtr L);
         [DllImport(NativeAbi.Library, CallingConvention = CallingConvention.Cdecl)]
-        static extern int sd_install(IntPtr L, string name, IntPtr cb, int[] kinds, int count, string handleField);
+        static extern int sd_install(IntPtr L, string name, IntPtr cb, int[] kinds, int count, int required, string handleField, string strictName);
         [DllImport(NativeAbi.Library, CallingConvention = CallingConvention.Cdecl)]
         static extern int sd_close(IntPtr L);
         readonly LuaEnv env;
@@ -49,7 +50,12 @@ namespace XLuaFastCall
 
         void Register(string name, Callback cb, int[] kinds, string handleField = "handle")
         {
-            if (sd_install(env.L, name, Marshal.GetFunctionPointerForDelegate(cb), kinds, kinds.Length, handleField) != 0)
+            Register(name, cb, kinds, kinds.Length, handleField);
+        }
+
+        void Register(string name, Callback cb, int[] kinds, int required, string handleField = "handle", string strictName = null)
+        {
+            if (sd_install(env.L, name, Marshal.GetFunctionPointerForDelegate(cb), kinds, kinds.Length, required, handleField, strictName) != 0)
                 throw new InvalidOperationException("Registration failed: " + name);
         }
 

@@ -29,13 +29,26 @@ namespace XLuaFastCallEditor {
             if(!m.IsPublic || m.IsGenericMethod || m.IsSpecialName || m.IsStatic)return "non-public/generic/static/special method";
             if(m.IsDefined(typeof(XLua.BlackListAttribute),true))return "XLua BlackList";
             var ps=m.GetParameters();
-            if(ps.Any(p=>p.IsOptional || p.IsDefined(typeof(ParamArrayAttribute),false) || (p.IsIn && p.ParameterType.IsByRef)))return "optional/params/in parameters";
+            if(ps.Any(p=>p.IsDefined(typeof(ParamArrayAttribute),false)))return "params parameters";
+            if(ps.Any(p=>p.IsIn && p.ParameterType.IsByRef))return "in parameters";
+            if(ps.Any(p=>p.IsOptional && p.ParameterType.IsByRef))return "optional byref parameter";
+            if(ps.Any(p=>p.IsOptional && !p.HasDefaultValue))return "optional parameter without default value";
+            bool optionalSeen=false;
+            foreach(var p in ps.Where(p=>!p.IsOut)) {
+                if(p.IsOptional)optionalSeen=true;
+                else if(optionalSeen)return "required input after optional parameter";
+            }
             if((m.ReturnType!=typeof(void)&&!Supported(m.ReturnType)) || ps.Any(p=>!Supported(ValueType(p))))return "unsupported type (only int, byte, long, float, double, bool, string; Vector and enum signatures must use explicit numeric interfaces)";
-            if(ps.Count(p=>!p.IsOut)>8)return "more than 8 input slots";
-            if((m.ReturnType==typeof(void)?0:1)+ps.Count(p=>p.ParameterType.IsByRef)>4)return "more than 4 output slots";
+            if(ps.Count(p=>!p.IsOut)>XLuaFastCall.Binding.MaxInputs)return "more than "+XLuaFastCall.Binding.MaxInputs+" input slots";
+            if((m.ReturnType==typeof(void)?0:1)+ps.Count(p=>p.ParameterType.IsByRef)>XLuaFastCall.Binding.MaxOutputs)return "more than "+XLuaFastCall.Binding.MaxOutputs+" output slots";
             return null;
         }
         static int Kind(Type t) => t==typeof(string)?7:t==typeof(bool)?3:(t==typeof(float)||t==typeof(double))?10:1;
+        static void ValidateMethod(MethodInfo method) {
+            string reason=UnsupportedReason(method);
+            if(reason!=null)
+                throw new InvalidOperationException("XLuaFastCall: attributed method "+method.DeclaringType.FullName+"."+method+" cannot be generated: "+reason);
+        }
         static string Read(Type t,int i) {
             if(t==typeof(string))return "c.String("+i+")";
             if(t==typeof(bool))return "c.Boolean("+i+")";
@@ -46,6 +59,10 @@ namespace XLuaFastCallEditor {
 
         static string Emit(Type type,MethodInfo m,string id) {
             var b=new StringBuilder();
+            var parameters=m.GetParameters();
+            var inputParams=parameters.Where(p=>!p.IsOut).ToArray();
+            int required=inputParams.Count(p=>!p.IsOptional);
+            bool strict=required!=inputParams.Length;
             b.AppendLine("        [AOT.MonoPInvokeCallback(typeof(Callback))]");
             b.AppendLine("        static int "+id+"(IntPtr L, IntPtr args, IntPtr frame)");
             b.AppendLine("        {");
@@ -53,16 +70,35 @@ namespace XLuaFastCallEditor {
             b.AppendLine("            try");
             b.AppendLine("            {");
             b.AppendLine("                var target = global::XLuaFastCall.ProxyRegistry.Get<"+T(type)+">(c.Receiver);");
+            if(strict)b.AppendLine("                int argc = c.ArgCount;");
             var args=new List<string>();var results=new List<KeyValuePair<Type,string>>();int input=0;
             if(m.ReturnType!=typeof(void))results.Add(new KeyValuePair<Type,string>(m.ReturnType,"result"));
-            foreach(var p in m.GetParameters()) {
+            foreach(var p in parameters) {
                 var t=ValueType(p);string n="p"+p.Position;
-                b.AppendLine("                "+T(t)+" "+n+(p.IsOut?";":" = "+Read(t,input++)+";"));
+                string read=p.IsOut?null:Read(t,input);
+                if(p.IsOptional)read="argc > "+input+" ? "+read+" : default";
+                if(!p.IsOut)input++;
+                b.AppendLine("                "+T(t)+" "+n+(p.IsOut?";":" = "+read+";"));
                 args.Add((p.IsOut?"out ":p.ParameterType.IsByRef?"ref ":"")+n);
                 if(p.ParameterType.IsByRef)results.Add(new KeyValuePair<Type,string>(t,n));
             }
             b.AppendLine();
-            b.AppendLine("                "+(m.ReturnType==typeof(void)?"":"var result = ")+"target.@"+m.Name+"("+string.Join(", ",args)+");");
+            if(!strict)b.AppendLine("                "+(m.ReturnType==typeof(void)?"":"var result = ")+"target.@"+m.Name+"("+string.Join(", ",args)+");");
+            else {
+                if(m.ReturnType!=typeof(void))b.AppendLine("                "+T(m.ReturnType)+" result;");
+                b.AppendLine("                switch (argc)");
+                b.AppendLine("                {");
+                for(int argc=required;argc<=inputParams.Length;argc++) {
+                    int slot=0;
+                    var passed=new List<string>();
+                    foreach(var p in parameters) {
+                        if(p.IsOut || slot++<argc)passed.Add(args[p.Position]);
+                    }
+                    // Omit optional arguments; C# supplies defaults without literal serialization.
+                    b.AppendLine("                    "+(argc==inputParams.Length?"default":"case "+argc)+": "+(m.ReturnType==typeof(void)?"":"result = ")+"target.@"+m.Name+"("+string.Join(", ",passed)+"); break;");
+                }
+                b.AppendLine("                }");
+            }
             b.AppendLine();
             bool strings=results.Any(r=>r.Key==typeof(string));
             bool singleString=strings && results.Count==1;
@@ -112,9 +148,7 @@ namespace XLuaFastCallEditor {
                     throw new InvalidOperationException("XLuaFastCall: mark only one overload per method name: " + type.FullName + "." + duplicate.Key);
                 var methods = entry.Value.OrderBy(m => m.Name, StringComparer.Ordinal).ToList();
                 foreach (var method in methods) {
-                    string reason = UnsupportedReason(method);
-                    if (reason != null)
-                        throw new InvalidOperationException("XLuaFastCall: attributed method " + type.FullName + "." + method + " cannot be generated: " + reason);
+                    ValidateMethod(method);
                 }
                 var b=new StringBuilder(Header+ClassHeader);
                 var ids=new List<string>();
@@ -132,8 +166,10 @@ namespace XLuaFastCallEditor {
                 foreach(var m in methods)install.AppendLine("                "+Q(m.Name)+",");
                 install.AppendLine("            });\n            try\n            {");
                 for(int i=0;i<methods.Count;i++) {
-                    var m=methods[i];var inputs=m.GetParameters().Where(p=>!p.IsOut).Select(ValueType).ToArray();
-                    install.AppendLine("                Register("+Q(m.Name)+", ConfiguredRoots"+typeIndex+"["+i+"], new int[] { "+string.Join(", ",inputs.Select(t=>Kind(t).ToString()))+" });");
+                    var m=methods[i];var inputs=m.GetParameters().Where(p=>!p.IsOut).ToArray();
+                    int required=inputs.Count(p=>!p.IsOptional);
+                    string strict=required==inputs.Length?"":", \"handle\", "+Q(type.FullName.Replace('+','.')+"."+m.Name);
+                    install.AppendLine("                Register("+Q(m.Name)+", ConfiguredRoots"+typeIndex+"["+i+"], new int[] { "+string.Join(", ",inputs.Select(p=>Kind(ValueType(p)).ToString()))+" }, "+required+strict+");");
                     install.AppendLine("                installed++;");
                 }
                 install.AppendLine("            }\n            finally\n            {\n                EndConfiguredType();\n            }\n");

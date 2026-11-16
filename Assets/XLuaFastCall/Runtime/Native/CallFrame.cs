@@ -25,6 +25,12 @@ namespace XLuaFastCall
             get => frame->Receiver;
         }
 
+        public int ArgCount
+        {
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            get => frame->Count - 1;
+        }
+
         // ---- 参数读取（语义与原 Binding.Integer/Boolean/Float/StrictNumber/ReadString 相同）
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public long Integer(int i)
@@ -82,7 +88,7 @@ namespace XLuaFastCall
             return LuaStringCodec.Read((byte*)s->Address, s->Length);
         }
 
-        // ---- 结果写入：i 为第 i 个结果（0..3），写到 cells[Inputs+i]。Cell.Kind 存 kind：1 int,2 number,3 bool,6 string
+        // ---- 结果写入：i 为第 i 个结果（0..Outputs-1），写到 cells[Inputs+i]。Cell.Kind 存 kind：1 int,2 number,3 bool,6 string
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void Return(int i, int v)
         {
