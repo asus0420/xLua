@@ -152,6 +152,8 @@ LUA_API void xlua_report_object_relationship(lua_State *L, ObjectRelationshipRep
 			lua_lock(L);
 #if LUA_VERSION_NUM >= 504 && LUA_VERSION_RELEASE_NUM >= 50406
 			setclLvalue2s(L, L->top.p, cl);
+#elif LUA_VERSION_NUM >= 504
+			setclLvalue2s(L, L->top, cl);
 #else
 			setclLvalue(L, L->top, cl);
 #endif
