@@ -248,8 +248,8 @@ if(XLUA_FASTCALL)
     if(USING_LUAJIT OR NOT LUA_VERSION STREQUAL "5.3.5")
         message(FATAL_ERROR "XLuaFastCall 仅支持 Lua 5.3.5（非 LuaJIT）")
     endif()
-    target_sources(xlua PRIVATE luaextension/XLuaFastCall/bridge.c)
-    set_source_files_properties(luaextension/XLuaFastCall/bridge.c
+    target_sources(xlua PRIVATE luaextension/lua_fast_call_bridge.c)
+    set_source_files_properties(luaextension/lua_fast_call_bridge.c
         PROPERTIES COMPILE_DEFINITIONS LUA_LIB)
 endif()
 
