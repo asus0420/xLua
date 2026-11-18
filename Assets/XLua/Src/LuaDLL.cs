@@ -250,7 +250,7 @@ namespace XLua.LuaDLL
             IntPtr str = lua_tolstring(L, index, out strlen);
             if (str != IntPtr.Zero)
 			{
-#if XLUA_GENERAL || (UNITY_WSA && !UNITY_EDITOR)
+#if XLUA_GENERAL || (UNITY_WSA && !UNITY_EDITOR) || (ENABLE_MONO && UNITY_2022_3_OR_NEWER)
                 int len = strlen.ToInt32();
                 byte[] buffer = new byte[len];
                 Marshal.Copy(str, buffer, 0, len);

@@ -61,7 +61,7 @@ namespace XLuaFastCall
         // Decode exceptions escape to the callback's catch; failed values are never cached.
         static string DecodeNonAscii(byte* data,int len)
         {
-#if XLUA_GENERAL || (UNITY_WSA && !UNITY_EDITOR)
+#if XLUA_GENERAL || (UNITY_WSA && !UNITY_EDITOR) || (ENABLE_MONO && UNITY_2022_3_OR_NEWER)
             return Encoding.UTF8.GetString(data,len);
 #else
             string result=Marshal.PtrToStringAnsi((IntPtr)data,len);
