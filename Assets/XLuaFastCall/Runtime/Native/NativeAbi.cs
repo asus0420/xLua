@@ -56,7 +56,7 @@ namespace XLuaFastCall
         const int LayoutSlot = 0, LayoutSlotTag = 1, LayoutCell = 2, LayoutSlotLength = 3, LayoutFrameCells = 4,
                   LayoutFrameCount = 5, LayoutFrameError = 6, LayoutCellKind = 7, LayoutCellSize = 8, LayoutReservedToken = 9,
                   LayoutFrame = 10, LayoutFrameReceiver = 11, LayoutCount = 12;
-        internal const int BufferAbiVersion = 1007;
+        internal const int BufferAbiVersion = 1009;
         internal const int TagFloat = 3, TagInteger = 19;
         internal const int Inputs = 32, Outputs = 16, ErrorBytes = 4096;
         [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]

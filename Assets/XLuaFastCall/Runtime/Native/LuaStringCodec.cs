@@ -46,16 +46,27 @@ namespace XLuaFastCall
             for(;k<len;k++)if(a[k]!=b[k])return false;
             return true;
         }
-        // ASCII 快速路径：每次检查 8 字节；发现高位非零则交给 UTF8 解码。
+        // ASCII fast path; non-ASCII uses the same platform decoder as xLua.lua_tostring.
         public static string Decode(byte* data,int len)
         {
             if(len==0)return string.Empty;
             int k=0;
-            for(;k+8<=len;k+=8)if((*(ulong*)(data+k)&0x8080808080808080UL)!=0)return Encoding.UTF8.GetString(data,len);
-            for(;k<len;k++)if(data[k]>=0x80)return Encoding.UTF8.GetString(data,len);
+            for(;k+8<=len;k+=8)if((*(ulong*)(data+k)&0x8080808080808080UL)!=0)return DecodeNonAscii(data,len);
+            for(;k<len;k++)if(data[k]>=0x80)return DecodeNonAscii(data,len);
             string s=new string('\0',len);
             fixed(char* p=s)for(k=0;k<len;k++)p[k]=(char)data[k];
             return s;
+        }
+        // Keep these platform conditions aligned with XLua.LuaDLL.Lua.lua_tostring.
+        // Decode exceptions escape to the callback's catch; failed values are never cached.
+        static string DecodeNonAscii(byte* data,int len)
+        {
+#if XLUA_GENERAL || (UNITY_WSA && !UNITY_EDITOR)
+            return Encoding.UTF8.GetString(data,len);
+#else
+            string result=Marshal.PtrToStringAnsi((IntPtr)data,len);
+            return result ?? Encoding.UTF8.GetString(data,len);
+#endif
         }
         // 从 buffer+used 开始编码并推进 used，让多个字符串返回值共享同一个缓冲区。
         // null 输出空指针；空字符串输出非空指针且长度为 0。

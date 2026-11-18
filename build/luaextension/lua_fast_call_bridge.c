@@ -42,6 +42,7 @@ enum
 enum
 {
     T_INTEGER = 1,
+    T_NUMBER = 2,
     T_BOOL = 3,
     T_STRING = 7,
     T_STRICT_NUMBER = 10
@@ -110,7 +111,7 @@ typedef struct
 typedef struct
 {
     Callback callback;
-    int count, required, strict, types[INPUTS];
+    int count, required, strict, allowExtra, userdataOnly, types[INPUTS];
 } Method;
 static char key;
 static Context *find(lua_State *L)
@@ -213,10 +214,9 @@ static void push_exception(lua_State *L, void *data)
     lua_concat(L, 2);
 }
 
-static int invoke(lua_State *L)
+static int invoke_method(lua_State *L, Method *m)
 {
     Context *c = (Context *)lua_touserdata(L, lua_upvalueindex(1));
-    Method *m = (Method *)lua_touserdata(L, lua_upvalueindex(2));
     int count = lua_gettop(L), i, status, d;
     int64_t receiver;
     Cell cells[INPUTS + OUTPUTS];
@@ -247,8 +247,10 @@ static int invoke(lua_State *L)
             else if (!ttisnumber(o)) goto invalid;
         }
     }
-    else if (count != m->count + 1)
+    else if (count < m->required + 1 || (!m->allowExtra && count > m->count + 1))
         return luaL_error(L, "Wrong argument count");
+    if (m->userdataOnly && (count < 1 || !ttisfulluserdata(L->ci->func + 1)))
+        return luaL_error(L, "Expected Proxy userdata as self");
     if (!receiver_of(L, &receiver))
         return luaL_error(L, "Expected integer Proxy handle or Proxy userdata with a valid handle");
     /* 首次属性 getter 可以回调 Lua/C#，返回后重新确认绑定仍然有效。 */
@@ -302,6 +304,8 @@ static int invoke(lua_State *L)
             /* 保持旧转换行为：普通数字允许数字字符串，严格数字由回调拒绝。 */
             if (t == T_INTEGER)
                 cells[i].i = lua_tointeger(L, index);
+            if (t == T_NUMBER)
+                cells[i].n = lua_tonumber(L, index);
         }
     }
     /* 未传入的可选槽不读取 Lua 栈；初始化以防止未定义值泄漏。 */
@@ -401,6 +405,30 @@ invalid:
     return lua_error(L);
 }
 
+/* Single methods keep their own entry; only group entries scan overloads. */
+static int invoke(lua_State *L) {
+  return invoke_method(L, (Method *)lua_touserdata(L, lua_upvalueindex(2)));
+}
+typedef struct { int count; Method methods[1]; } MethodGroup;
+static int invoke_group(lua_State *L) {
+  MethodGroup *group = (MethodGroup *)lua_touserdata(L, lua_upvalueindex(2));
+  int argc = lua_gettop(L) - 1, branch, i;
+  for (branch = 0; branch < group->count; branch++) {
+    Method *m = &group->methods[branch];
+    if (argc != m->required) continue;
+    for (i = 0; i < argc; i++) {
+      const TValue *v = L->ci->func + i + 2;
+      int kind = m->types[i];
+      if (kind == T_STRING) { if (!ttisnil(v) && !ttisstring(v)) break; }
+      else if (kind == T_BOOL) { if (!ttisboolean(v)) break; }
+      else if (!ttisnumber(v)) break;
+    }
+    if (i == argc) return invoke_method(L, m);
+  }
+  lua_pushvalue(L, lua_upvalueindex(4));
+  return lua_error(L);
+}
+
 // 报告自定义结构布局，不再暴露 Lua 私有结构偏移。
 API int sd_layout(int *p)
 {
@@ -418,7 +446,7 @@ API int sd_layout(int *p)
     p[L_CELL_SIZE] = offsetof(Cell, size);
     p[L_FRAME] = sizeof(Frame);
     p[L_FRAME_RECEIVER] = offsetof(Frame, receiver);
-    return 1007;
+    return 1009;
 }
 
 // 同一 Lua 注册表只允许创建一个上下文；正式入口没有验证参数。
@@ -436,19 +464,20 @@ API int sd_open(lua_State *L)
     return 0;
 }
 // 注册闭包：上下文、方法描述、句柄属性名、严格模式错误字符串四个 upvalue。
-API int sd_install(lua_State *L, const char *name, Callback callback, const int *types, int count,
-                   int required, const char *handleField, const char *strictName)
+static int install(lua_State *L, const char *name, Callback callback, const int *types, int count,
+                   int required, int allowExtra, int userdataOnly, const char *handleField, const char *strictName)
 {
     Context *c = find(L);
     Method *m;
     int i;
     if (!c || c->closed || c->depth || !name || !callback || !handleField || !handleField[0] || count < 0 ||
-        count > INPUTS || required < 0 || required > count || (!strictName && required != count) ||
+        count > INPUTS || required < 0 || required > count || (strictName && allowExtra) ||
+        (allowExtra != 0 && allowExtra != 1) ||
         (count && !types) || !lua_istable(L, -1))
         return -1;
     for (i = 0; i < count; i++)
         if (types[i] != T_INTEGER && types[i] != T_BOOL && types[i] != T_STRING &&
-            types[i] != T_STRICT_NUMBER)
+            types[i] != T_STRICT_NUMBER && (types[i] != T_NUMBER || !userdataOnly))
             return -1;
     lua_rawgetp(L, LUA_REGISTRYINDEX, &key);
     m = (Method *)lua_newuserdata(L, sizeof(Method));
@@ -457,6 +486,8 @@ API int sd_install(lua_State *L, const char *name, Callback callback, const int 
     m->count = count;
     m->required = required;
     m->strict = strictName != NULL;
+    m->allowExtra = allowExtra;
+    m->userdataOnly = userdataOnly;
     for (i = 0; i < count; i++)
     {
         int t = types[i];
@@ -469,6 +500,50 @@ API int sd_install(lua_State *L, const char *name, Callback callback, const int 
     lua_setfield(L, -2, name);
     return 0;
 }
+// Preserve the existing production export and its exact-count legacy contract.
+API int sd_install(lua_State *L, const char *name, Callback callback, const int *types, int count,
+                   int required, const char *handleField, const char *strictName)
+{
+    if (!strictName && required != count) return -1;
+    return install(L, name, callback, types, count, required, 0, 0, handleField, strictName);
+}
+API int sd_install_proxy(lua_State *L, const char *name, Callback callback, const int *types, int count,
+                         int required, int allowExtra, const char *handleField, const char *strictName)
+{
+    return install(L, name, callback, types, count, required, allowExtra, 1, handleField, strictName);
+}
+/* All descriptors are copied at registration; no per-call allocation. */
+API int sd_install_group(lua_State *L, const char *name, const Callback *callbacks,
+                         const int *counts, const int *arities, const int *types,
+                         int branches, const char *handleField, const char *strictName) {
+  Context *c = find(L);
+  MethodGroup *group;
+  int b, i;
+  if (!c || c->closed || c->depth || !name || !callbacks || !counts || !arities || !types ||
+      !handleField || !handleField[0] || !strictName || branches < 2 || branches > 1024 || !lua_istable(L, -1)) return -1;
+  for (b = 0; b < branches; b++) {
+    if (!callbacks[b] || counts[b] < 0 || counts[b] > INPUTS || arities[b] < 0 || arities[b] > counts[b]) return -1;
+    for (i = 0; i < counts[b]; i++) {
+      int t = types[b * INPUTS + i];
+      if (t != T_INTEGER && t != T_STRICT_NUMBER && t != T_BOOL && t != T_STRING) return -1;
+    }
+  }
+  lua_rawgetp(L, LUA_REGISTRYINDEX, &key);
+  group = (MethodGroup *)lua_newuserdata(L, offsetof(MethodGroup, methods) + branches * sizeof(Method));
+  group->count = branches;
+  for (b = 0; b < branches; b++) {
+    Method *m = &group->methods[b];
+    memset(m, 0, sizeof(*m));
+    m->callback = callbacks[b]; m->count = counts[b]; m->required = arities[b]; m->userdataOnly = 1;
+    for (i = 0; i < counts[b]; i++) m->types[i] = types[b * INPUTS + i];
+  }
+  lua_pushstring(L, handleField);
+  lua_pushfstring(L, "invalid arguments to %s!", strictName);
+  lua_pushcclosure(L, invoke_group, 4);
+  lua_setfield(L, -2, name);
+  return 0;
+}
+
 // 关闭后保留上下文供旧闭包检查，回调期间拒绝关闭。
 API int sd_close(lua_State *L)
 {

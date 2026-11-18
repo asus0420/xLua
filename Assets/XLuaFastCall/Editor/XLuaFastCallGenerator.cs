@@ -44,21 +44,21 @@ namespace XLuaFastCallEditor {
             if((m.ReturnType==typeof(void)?0:1)+ps.Count(p=>p.ParameterType.IsByRef)>XLuaFastCall.Binding.MaxOutputs)return "more than "+XLuaFastCall.Binding.MaxOutputs+" output slots";
             return null;
         }
-        static int Kind(Type t) => t==typeof(string)?7:t==typeof(bool)?3:(t==typeof(float)||t==typeof(double))?10:1;
+        static int Kind(Type t,bool permissive) => t==typeof(string)?7:t==typeof(bool)?3:(t==typeof(float)||t==typeof(double))?(permissive?2:10):1;
         static void ValidateMethod(MethodInfo method) {
             string reason=UnsupportedReason(method);
             if(reason!=null)
                 throw new InvalidOperationException("XLuaFastCall: attributed method "+method.DeclaringType.FullName+"."+method+" cannot be generated: "+reason);
         }
-        static string Read(Type t,int i) {
+        static string Read(Type t,int i,bool permissive) {
             if(t==typeof(string))return "c.String("+i+")";
             if(t==typeof(bool))return "c.Boolean("+i+")";
-            if(t==typeof(float))return "c.Float("+i+")";
-            if(t==typeof(double))return "c.StrictNumber("+i+")";
+            if(t==typeof(float))return permissive?"(float)c.Number("+i+")":"c.Float("+i+")";
+            if(t==typeof(double))return "c."+(permissive?"Number":"StrictNumber")+"("+i+")";
             return "("+T(t)+")"+"c.Integer("+i+")";
         }
 
-        static string Emit(Type type,MethodInfo m,string id) {
+        static string Emit(Type type,MethodInfo m,string id,bool permissive) {
             var b=new StringBuilder();
             var parameters=m.GetParameters();
             var inputParams=parameters.Where(p=>!p.IsOut).ToArray();
@@ -76,7 +76,7 @@ namespace XLuaFastCallEditor {
             if(m.ReturnType!=typeof(void))results.Add(new KeyValuePair<Type,string>(m.ReturnType,"result"));
             foreach(var p in parameters) {
                 var t=ValueType(p);string n="p"+p.Position;
-                string read=p.IsOut?null:Read(t,input);
+                string read=p.IsOut?null:Read(t,input,permissive);
                 if(p.IsOptional)read="argc > "+input+" ? "+read+" : default";
                 if(!p.IsOut)input++;
                 b.AppendLine("                "+T(t)+" "+n+(p.IsOut?";":" = "+read+";"));
@@ -140,7 +140,7 @@ namespace XLuaFastCallEditor {
             GenerateWithOptions(options);
         }
 
-        // Explicit entry point for project tools. No native code or runtime ABI changes.
+        // Explicit entry point for project tools; generation and source edits are validated together.
         public static void GenerateWithOptions(XLuaFastCallGenerationOptions options) {
             if(options==null)throw new ArgumentNullException(nameof(options));
             if(Generator.LuaCallCSharp==null)Generator.GetGenConfig(XLua.Utils.GetAllTypes());
@@ -174,6 +174,7 @@ namespace XLuaFastCallEditor {
                 if(targetMethods.Count==0)config.Remove(target.TargetType);
                 else config[target.TargetType]=targetMethods.ToArray();
             }
+            var decisions=new List<string>();
             var files=new Dictionary<string,string>();var names=new HashSet<string>();
             var luaFiles=new Dictionary<string,string>();
             var install=new StringBuilder(Header+ClassHeader+"        partial void InstallConfigured(ref int installed)\n        {\n");
@@ -183,18 +184,31 @@ namespace XLuaFastCallEditor {
                 if(Generator.LuaCallCSharp==null || !Generator.LuaCallCSharp.Contains(type))
                     throw new InvalidOperationException("XLuaFastCall type must also be in XLua LuaCallCSharp configuration: "+type);
                 if(!type.IsClass || !type.IsVisible || type.ContainsGenericParameters || !names.Add(type.Name) || type.Name.StartsWith("_") || type.Name=="Enums" || type.Name=="InstallProxyMethods")throw new InvalidOperationException("Invalid or duplicate XLuaFastCall type name: "+type);
-                var duplicate = entry.Value.GroupBy(m => m.Name).FirstOrDefault(g => g.Count() > 1);
-                if (duplicate != null)
-                    throw new InvalidOperationException("XLuaFastCall: mark only one overload per method name: " + type.FullName + "." + duplicate.Key);
-                var methods = entry.Value.OrderBy(m => m.Name, StringComparer.Ordinal).ToList();
-                foreach (var method in methods) {
-                    ValidateMethod(method);
+                var selected = new HashSet<MethodInfo>(entry.Value);
+                var allGroups = XLuaMethodGroups.Read(type);
+                var groups = new List<XLuaMethodGroups.Group>();
+                foreach (var group in allGroups.Where(g=>g.Methods.Any(selected.Contains))) {
+                    var missing=group.Methods.Where(m=>!selected.Contains(m)).ToArray();
+                    var unsupported=group.Methods.Select(m=>new {Method=m,Reason=UnsupportedReason(m)}).Where(x=>x.Reason!=null).ToArray();
+                    if(group.IsStatic || missing.Length>0 || unsupported.Length>0 || group.Branches.Count>1024) {
+                        decisions.Add("SKIP " + type.FullName + "." + group.Name + " | entire group retains original Wrap | " +
+                            (group.IsStatic?"static group; ":"") + (group.Branches.Count>1024?"more than 1024 branches; ":"") +
+                            string.Join("; ",missing.Select(m=>"not selected: "+m).Concat(unsupported.Select(x=>x.Method+": "+x.Reason))));
+                        continue;
+                    }
+                    groups.Add(group);
+                    decisions.Add("FAST " + type.FullName + "." + group.Name + " | branches=" + group.Branches.Count);
                 }
+                foreach(var m in selected.Where(m=>!allGroups.Any(g=>g.Methods.Contains(m))))
+                    decisions.Add("SKIP "+type.FullName+"."+m.Name+" | not exported by xLua: "+m);
+                var methods=groups.SelectMany(g=>g.Methods).Distinct().ToList();
                 if(options.LuaOutputDirectory!=null)luaFiles.Add(type.Name+"XLuaFastCall.lua",EmitLua(type,methods));
                 var b=new StringBuilder(Header+ClassHeader);
                 var ids=new List<string>();
                 for(int i=0;i<methods.Count;i++) {
-                    string id="Configured_"+typeIndex+"_"+i;ids.Add(id);b.Append(Emit(type,methods[i],id));
+                    string id="Configured_"+typeIndex+"_"+i;ids.Add(id);
+                    bool permissive=groups.Single(g=>g.Methods.Contains(methods[i])).Branches.Count==1;
+                    b.Append(Emit(type,methods[i],id,permissive));
                 }
                 // Register must use these exact delegate instances, including on Mono.
                 b.AppendLine("        static readonly Callback[] ConfiguredRoots"+typeIndex+" =");
@@ -204,19 +218,23 @@ namespace XLuaFastCallEditor {
                 files.Add(type.Name+"XLuaFastCall.cs",b.ToString());
                 install.AppendLine("            BeginConfiguredType(typeof("+T(type)+"), "+Q(type.Name)+", new string[]");
                 install.AppendLine("            {");
-                foreach(var m in methods)install.AppendLine("                "+Q(m.Name)+",");
+                foreach(var group in groups)install.AppendLine("                "+Q(group.Name)+",");
                 install.AppendLine("            });\n            try\n            {");
-                for(int i=0;i<methods.Count;i++) {
-                    var m=methods[i];var inputs=m.GetParameters().Where(p=>!p.IsOut).ToArray();
-                    int required=inputs.Count(p=>!p.IsOptional);
-                    string strict=required==inputs.Length?"":", \"handle\", "+Q(type.FullName.Replace('+','.')+"."+m.Name);
-                    install.AppendLine("                Register("+Q(m.Name)+", ConfiguredRoots"+typeIndex+"["+i+"], new int[] { "+string.Join(", ",inputs.Select(p=>Kind(ValueType(p)).ToString()))+" }, "+required+strict+");");
+                foreach(var group in groups) {
+                    if(group.Branches.Count==1) {
+                        var m=group.Methods[0];var inputs=m.GetParameters().Where(p=>!p.IsOut).ToArray();
+                        install.AppendLine("                Register("+Q(group.Name)+", ConfiguredRoots"+typeIndex+"["+methods.IndexOf(m)+"], new int[] { "+string.Join(", ",inputs.Select(p=>Kind(ValueType(p),true).ToString()))+" }, 0, true, userdataOnly: true);");
+                    } else {
+                        install.AppendLine("                RegisterGroup("+Q(group.Name)+", new Callback[] { "+string.Join(", ",group.Branches.Select(branch=>"ConfiguredRoots"+typeIndex+"["+methods.IndexOf(branch.Method)+"]"))+" },");
+                        install.AppendLine("                    new int[][] { "+string.Join(", ",group.Branches.Select(branch=>"new int[] { "+string.Join(", ",branch.Method.GetParameters().Where(p=>!p.IsOut).Select(p=>Kind(ValueType(p),false).ToString()))+" }"))+" },");
+                        install.AppendLine("                    new int[] { "+string.Join(", ",group.Branches.Select(branch=>branch.Arity.ToString()))+" }, "+Q(type.FullName.Replace('+','.')+"."+group.Methods[0].Name)+");");
+                    }
                     install.AppendLine("                installed++;");
                 }
                 install.AppendLine("            }\n            finally\n            {\n                EndConfiguredType();\n            }\n");
                 typeIndex++;
             }
-            install.AppendLine("        }\n    }\n}");
+            install.AppendLine("        }\n        partial void ConfiguredGenerationPresent(ref bool present) { present = true; }\n    }\n}");
             files.Add("XLuaFastCallRegister.Generated.cs",install.ToString());
             string luaOutput=null;
             if(options.LuaOutputDirectory!=null) {
@@ -241,7 +259,8 @@ namespace XLuaFastCallEditor {
                     if(!luaFiles.ContainsKey(Path.GetFileName(file)) && File.ReadAllText(file).StartsWith(LuaHeader,StringComparison.Ordinal))File.Delete(file);
                 foreach(var file in luaFiles)File.WriteAllText(Path.Combine(luaOutput,file.Key),file.Value,new UTF8Encoding(false));
             }
-            Debug.Log("XLuaFastCall Generate finished: "+output);
+            File.WriteAllLines(Path.Combine(output,"generation-decisions.txt"),decisions,new UTF8Encoding(false));
+            Debug.Log("XLuaFastCall Generate finished: "+output+"; skipped groups/signatures: "+decisions.Count(x=>x.StartsWith("SKIP ")));
         }
         const string LuaHeader="-- Generated by XLuaFastCallEditor.XLuaFastCallGenerator.\n";
         static string LuaQuote(string value)=>"\""+value.Replace("\\","\\\\").Replace("\"","\\\"").Replace("\r","\\r").Replace("\n","\\n")+"\"";
@@ -250,7 +269,7 @@ namespace XLuaFastCallEditor {
             var b=new StringBuilder(LuaHeader);
             b.AppendLine("local fast = XLuaFastCall["+LuaQuote(type.Name)+"]");
             b.AppendLine("return {");
-            foreach(var method in methods.OrderBy(m=>m.Name,StringComparer.Ordinal))
+            foreach(var method in methods.GroupBy(m=>m.Name).Select(g=>g.First()).OrderBy(m=>m.Name,StringComparer.Ordinal))
                 b.AppendLine("    ["+LuaQuote(method.Name)+"] = fast["+LuaQuote(method.Name)+"],");
             b.AppendLine("}");return b.ToString();
         }

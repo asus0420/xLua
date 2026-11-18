@@ -80,6 +80,19 @@ namespace XLuaFastCall
             throw new InvalidCastException("Expected Lua number");
         }
 
+        // T_NUMBER mirrors lua_tonumber in a single ordinary generated Wrap:
+        // native code converts numeric strings and zeroes missing/invalid values.
+        // Only use with T_NUMBER; T_STRICT_NUMBER leaves the fallback Cell unset.
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public double Number(int i)
+        {
+            CheckInput(i);
+            Slot* s = args + i;
+            if (s->Tag == TagInteger) return s->Integer;
+            if (s->Tag == TagFloat) return s->Number;
+            return frame->Cells[i].Number;
+        }
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public string String(int i)
         {

@@ -41,8 +41,8 @@ namespace XLuaFastCallEditor
             foreach(var member in members)
                 foreach(var method in methods)
                     if(Matches(tokens,pairs,member,method))candidates.Add(Tuple.Create(member,method));
-            var ambiguous=new HashSet<string>(candidates.GroupBy(c=>c.Item2.Name).Where(g=>g.Count()!=1).Select(g=>g.Key));
-            var accepted=candidates.Where(c=>!ambiguous.Contains(c.Item2.Name)).ToArray();
+            var ambiguous=new HashSet<MethodInfo>(candidates.GroupBy(c=>c.Item2).Where(g=>g.Count()!=1).Select(g=>g.Key));
+            var accepted=candidates.Where(c=>!ambiguous.Contains(c.Item2)).ToArray();
             selected=accepted.Select(c=>c.Item2).ToArray();
 
             var edits=new List<Edit>();

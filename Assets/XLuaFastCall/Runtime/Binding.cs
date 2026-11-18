@@ -16,12 +16,17 @@ namespace XLuaFastCall
         static extern int sd_install(IntPtr L, string name, IntPtr cb, int[] kinds, int count, int required, string handleField, string strictName);
         [DllImport(NativeAbi.Library, CallingConvention = CallingConvention.Cdecl)]
         static extern int sd_close(IntPtr L);
+        [DllImport(NativeAbi.Library, CallingConvention = CallingConvention.Cdecl)]
+        static extern int sd_install_proxy(IntPtr L, string name, IntPtr cb, int[] kinds, int count, int required, int allowExtra, string handleField, string strictName);
+        [DllImport(NativeAbi.Library, CallingConvention = CallingConvention.Cdecl)]
+        static extern int sd_install_group(IntPtr L, string name, IntPtr[] callbacks, int[] counts, int[] arities, int[] kinds, int branches, string handleField, string strictName);
         readonly LuaEnv env;
         readonly ObjectTranslator translator;
         readonly int thread = System.Threading.Thread.CurrentThread.ManagedThreadId;
         bool closed;
         // 注册逻辑仅在初始化执行，回调保留原生快速路径。
         partial void InstallConfigured(ref int installed);
+        partial void ConfiguredGenerationPresent(ref bool present);
         public Binding(LuaEnv env)
         {
             this.env = env;
@@ -36,9 +41,11 @@ namespace XLuaFastCall
                     throw new InvalidOperationException("XLuaFastCall open failed");
                 opened = true;
                 int installed = 0;
-                InstallConfigured(ref installed);
-                if (installed == 0)
+                bool generated = false;
+                ConfiguredGenerationPresent(ref generated);
+                if (!generated)
                     throw new InvalidOperationException("Run XLua/Generate Code before creating a configured binding");
+                InstallConfigured(ref installed);
             }
             catch
             {
@@ -57,6 +64,33 @@ namespace XLuaFastCall
         {
             if (sd_install(env.L, name, Marshal.GetFunctionPointerForDelegate(cb), kinds, kinds.Length, required, handleField, strictName) != 0)
                 throw new InvalidOperationException("Registration failed: " + name);
+        }
+
+        // Generated proxy entries never accept an integer registry handle as self.
+        void Register(string name, Callback cb, int[] kinds, int required, bool allowExtra,
+                      string handleField = "handle", string strictName = null, bool userdataOnly = true)
+        {
+            if (!userdataOnly) throw new ArgumentException("Proxy registrations require userdata self", nameof(userdataOnly));
+            if (sd_install_proxy(env.L, name, Marshal.GetFunctionPointerForDelegate(cb), kinds, kinds.Length,
+                                 required, allowExtra ? 1 : 0, handleField, strictName) != 0)
+                throw new InvalidOperationException("Registration failed: " + name);
+        }
+
+        void RegisterGroup(string name, Callback[] callbacks, int[][] kinds, int[] arities, string strictName)
+        {
+            if (callbacks.Length != kinds.Length || kinds.Length != arities.Length) throw new ArgumentException("Group descriptor count mismatch");
+            var pointers = new IntPtr[callbacks.Length];
+            var counts = new int[callbacks.Length];
+            var flat = new int[callbacks.Length * MaxInputs];
+            for (int i = 0; i < callbacks.Length; i++)
+            {
+                if (kinds[i].Length > MaxInputs) throw new ArgumentException("Too many group inputs");
+                pointers[i] = Marshal.GetFunctionPointerForDelegate(callbacks[i]);
+                counts[i] = kinds[i].Length;
+                Array.Copy(kinds[i], 0, flat, i * MaxInputs, counts[i]);
+            }
+            if (sd_install_group(env.L, name, pointers, counts, arities, flat, callbacks.Length, "handle", strictName) != 0)
+                throw new InvalidOperationException("Group registration failed: " + name);
         }
 
         // 仅在对象池开始新一轮使用时清除缓存；常规调用不进入此方法。
