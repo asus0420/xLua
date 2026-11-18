@@ -359,6 +359,7 @@ namespace XLua
 					end 
 				end)%>) <%end%>
 			{
+				<%if TableWriterReturn(overload) then%>XLua.LuaTableWriter.RequireMainThread(L);<%end%>
 				<%if overload.Name == "get_Item" and overload.IsSpecialName then
 					local keyType = overload:GetParameters()[0].ParameterType%>
 					<%=GetCasterStatement(keyType, 2, "key", true)%>;
@@ -390,7 +391,7 @@ namespace XLua
 					if pi ~= 0 then %>, <% end; if parameter.IsOut and parameter.ParameterType.IsByRef then %>out <% elseif parameter.ParameterType.IsByRef and not parameter.IsIn then %>ref <% end %><%=LocalName(parameter.Name)%><% end) %> );
 				<%
 				if has_return then
-				%><%=GetPushStatement(overload.ReturnType, "gen_ret")%>;
+				%><%=GetMethodReturnPushStatement(overload.ReturnType, "gen_ret")%>;
 				<%
 				end
 				local in_pos = 0

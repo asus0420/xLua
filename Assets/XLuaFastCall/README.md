@@ -95,3 +95,14 @@ uservalue 专用于此缓存，不要通过 Lua debug API 修改。同一 userda
 CMake XLUA_FASTCALL 默认 OFF，由 Lua 5.3 平台脚本启用。沿用 make_win64_lua53.bat、make_win32_lua53.bat、make_android_lua53.sh、make_ios_lua53.sh，编入各平台 XLua 库，不生成独立优化库。
 
 历史安全验证记录在 TestLua 的 Verification/ProductionSafety/。默认参数与 32/16 扩容的 TestLua 50 项编辑器用例及性能记录位于 Verification/DefaultArgs/RESULTS.md；它们不是本次生产二进制的运行结果。生产源码同步备份、差异和检查记录保存在 TestLua 的 Verification/DefaultArgs/ProductionSync/，不作为生产文件迁入。
+
+
+## LuaTableWriter 方法返回值
+
+业务显式返回 LuaTableWriter / LuaTableWriter?，使用 LuaTableWriter.New(env) 和 Set 构造表，然后重新生成绑定。支持普通 Wrap、GCM 和反射的方法返回值；不支持 Writer 入参、out/ref/params、属性或索引器输出。原有 LuaTable 输入及返回保留原路径。
+
+仅限全局单线程、Lua 主状态回调内使用；协程在业务调用前拒绝。Writer 不得缓存、跨帧/await 或跨 LuaEnv 生命周期使用。调用帧及表身份检查仅作辅助检测。枚举复用 xLua PushByType，保留 userdata 语义及原有装箱行为。
+
+实现与 FastCall 放在一起，但不接入 FastCall 参数/返回协议。沿用 XLUA_FASTCALL=ON 构建入口，库需包含 xlua_tw_main/new/set/push 四个导出。FastCall ABI 1009 和 Frame 不变；仅有 ABI 1009 不代表库已包含 Writer。
+
+普通签名的生成 Wrap 不增加 Writer 运行检查。通用 Push/PushAny 不增加 Writer 判断；Writer 仅允许以显式方法返回值使用，不得装箱或放入容器后经普通对象路径推送。反射增加返回类型标记和分支判断。原生保护仅覆盖 Writer 自己的操作，不扩展至枚举 PushByType 或任意业务代码。

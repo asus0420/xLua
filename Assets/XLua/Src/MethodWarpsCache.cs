@@ -39,6 +39,7 @@ namespace XLua
         object[] defaultValueArray;
 
         bool isVoid = true;
+        bool writerReturn;
 
         int luaStackPosStart = 1;
 
@@ -72,6 +73,7 @@ namespace XLua
                 }
             }
 
+            writerReturn = LuaTableWriter.ValidateSignature(method);
             var paramInfos = method.GetParameters();
             refPos = new int[paramInfos.Length];
 
@@ -186,6 +188,7 @@ namespace XLua
                     UnityEngine.Debug.LogWarning("Obsolete Method [" + method.DeclaringType.ToString() + "." + method.Name + "]: " + info.Message);
                 } 
 #endif
+                if (writerReturn) LuaTableWriter.RequireMainThread(L);
                 object target = null;
                 MethodBase toInvoke = method;
 
@@ -251,7 +254,8 @@ namespace XLua
                 if (!isVoid)
                 {
                     //UnityEngine.Debug.Log(toInvoke.ToString() + " ret:" + ret);
-                    translator.PushAny(L, ret);
+                    if (writerReturn) LuaTableWriter.PushDeclaredResult(L, ret);
+                    else translator.PushAny(L, ret);
                     nRet++;
                 }
 

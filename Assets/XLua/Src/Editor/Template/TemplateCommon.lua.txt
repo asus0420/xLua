@@ -299,6 +299,7 @@ function NeedUpdate(t)
 end
 
 function GetCasterStatement(t, idx, var_name, need_declare, is_v_params)
+    if IsTableWriter(t) then error("LuaTableWriter inputs are unsupported") end
     local testname = getSafeFullName(t)
 	local statement = ""
     local is_struct = IsStruct(t)
@@ -364,7 +365,32 @@ end
 
 local GetNullableUnderlyingType = CS.System.Nullable.GetUnderlyingType
 
+function IsTableWriter(t)
+    if t.IsByRef then t = t:GetElementType() end
+    local underlying = GetNullableUnderlyingType(t)
+    return (underlying or t).FullName == "XLua.LuaTableWriter"
+end
+
+function TableWriterReturn(overload)
+    ForEachCsList(overload:GetParameters(), function(p)
+        local t = p.ParameterType
+        if t.HasElementType then t = t:GetElementType() end
+        if IsTableWriter(t) then error("LuaTableWriter only supports method return values: " .. overload.Name) end
+    end)
+    local output = IsTableWriter(overload.ReturnType)
+    if output and (overload.IsSpecialName or overload.ReturnType.IsByRef) then
+        error("LuaTableWriter only supports ordinary method return values: " .. overload.Name)
+    end
+    return output
+end
+
+function GetMethodReturnPushStatement(t, variable)
+    if IsTableWriter(t) then return "XLua.LuaTableWriter.Push(L, " .. variable .. ")" end
+    return GetPushStatement(t, variable)
+end
+
 function GetPushStatement(t, variable, is_v_params)
+    if IsTableWriter(t) then error("LuaTableWriter only supports method return values") end
     if is_v_params then
 	    local item_push = GetPushStatement(t:GetElementType(), variable..'[__gen_i]')
 		return 'if ('.. variable ..' != null)  { for (int __gen_i = 0; __gen_i < ' .. variable .. '.Length; ++__gen_i) ' .. item_push .. '; }'

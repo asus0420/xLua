@@ -555,3 +555,101 @@ API int sd_close(lua_State *L)
     c->closed = 1;
     return 0;
 }
+
+/* LuaTableWriter: independent of the FastCall protocol. Lua 5.3 main state only. */
+#include "lstring.h"
+#include "lgc.h"
+#define TW_OK 0
+#define TW_LUAERR 1
+#define TW_STALE -1
+#define TW_NOSTACK -2
+#define TW_STATE -3
+#define TW_BADARGS -4
+#define TW_NO_CALLBACK -5
+static int tw_valid(lua_State *L, int idx, const void *ptr) {
+    return L && ptr && idx > 0 && idx <= lua_gettop(L) &&
+        lua_type(L, idx) == LUA_TTABLE && lua_topointer(L, idx) == ptr;
+}
+API int xlua_tw_main(lua_State *L) { return L && L == G(L)->mainthread; }
+typedef struct { int array, hash; } tw_new_args;
+static void tw_do_new(lua_State *L, void *ud) {
+    tw_new_args *a = (tw_new_args*)ud;
+    lua_createtable(L, a->array, a->hash);
+}
+API int xlua_tw_new(lua_State *L, int parent, const void *parent_ptr,
+                    int array, int hash, int *idx, const void **ptr) {
+    tw_new_args a;
+    if (!L || L != G(L)->mainthread) return TW_STATE;
+    /* Auxiliary misuse guard, not a lifetime token or proof of a Writer wrap. */
+    if (L->ci == &L->base_ci || isLua(L->ci)) return TW_NO_CALLBACK;
+    if (parent && !tw_valid(L, parent, parent_ptr)) return TW_STALE;
+    if (array < 0 || hash < 0) return TW_BADARGS;
+    if (!lua_checkstack(L, 3)) return TW_NOSTACK;
+    a.array = array; a.hash = hash;
+    if (luaD_pcall(L, tw_do_new, &a, savestack(L, L->top), 0) != LUA_OK) return TW_LUAERR;
+    *idx = lua_gettop(L); *ptr = lua_topointer(L, -1);
+    return TW_OK;
+}
+/* kind: 0=nil, 1=integer, 2=number, 3=boolean, 4=UTF8, 5=table, 6=borrowed stack-top value.
+   key_kind: 0=integer, 1=UTF8. Strings share a contiguous key/value buffer. */
+typedef struct {
+    int idx, key_kind, key_len, value_len, kind, child, value_slot;
+    lua_Integer key, integer;
+    lua_Number number;
+    const char *bytes;
+} tw_set_args;
+static void tw_push_string(lua_State *L, const char *bytes, int len) {
+    TString *s = luaS_newlstr(L, bytes, (size_t)len);
+    setsvalue2s(L, L->top, s); L->top++;
+}
+static void tw_do_set(lua_State *L, void *ud) {
+    tw_set_args *a = (tw_set_args*)ud;
+    if (a->key_kind) {
+        /* Reject nil before calculating a value pointer from key_len. */
+        if (a->key_len < 0) luaL_error(L, "table index is nil");
+        tw_push_string(L, a->bytes, a->key_len);
+    } else lua_pushinteger(L, a->key);
+    switch (a->kind) {
+        case 0: lua_pushnil(L); break;
+        case 1: lua_pushinteger(L, a->integer); break;
+        case 2: lua_pushnumber(L, a->number); break;
+        case 3: lua_pushboolean(L, a->integer != 0); break;
+        case 4: tw_push_string(L, a->bytes + (a->key_kind ? a->key_len : 0), a->value_len); break;
+        case 5: lua_pushvalue(L, a->child); break;
+        case 6: lua_pushvalue(L, a->value_slot); break;
+    }
+    lua_rawset(L, a->idx);
+    /* Both strings have been copied/rooted before finalizers can reenter C#. */
+    if (a->key_kind || a->kind == 4) luaC_checkGC(L);
+}
+API int xlua_tw_set(lua_State *L, int idx, const void *ptr,
+    int key_kind, lua_Integer key, const char *bytes, int bytes_len, int key_len,
+    int kind, lua_Integer integer, lua_Number number, int value_len,
+    lua_State *child_owner, int child, const void *child_ptr) {
+    tw_set_args a;
+    if (!tw_valid(L, idx, ptr)) return TW_STALE;
+    if (key_kind < 0 || key_kind > 1 || kind < 0 || kind > 6 || key_len < -1 || value_len < 0) return TW_BADARGS;
+    if ((key_kind && key_len > 0) || kind == 4) {
+        int prefix = key_kind && key_len > 0 ? key_len : 0;
+        if (!bytes || bytes_len < prefix || value_len > bytes_len - prefix) return TW_BADARGS;
+    }
+    if (kind == 5) {
+        if (L != child_owner) return TW_STATE;
+        if (!tw_valid(L, child, child_ptr)) return TW_STALE;
+    }
+    /* Borrow, do not consume: caller restores its entry top on every return. */
+    a.value_slot = kind == 6 ? lua_gettop(L) : 0;
+    if (kind == 6 && a.value_slot <= idx) return TW_BADARGS;
+    if (!lua_checkstack(L, 2)) return TW_NOSTACK;
+    a.idx=idx; a.key_kind=key_kind; a.key=key; a.bytes=bytes;
+    a.key_len=key_len; a.kind=kind; a.integer=integer; a.number=number;
+    a.value_len=value_len; a.child=child;
+    return luaD_pcall(L, tw_do_set, &a, savestack(L, L->top), 0) == LUA_OK ? TW_OK : TW_LUAERR;
+}
+API int xlua_tw_push(lua_State *L, lua_State *owner, int idx, const void *ptr) {
+    if (L != owner) return TW_STATE;
+    if (!tw_valid(L, idx, ptr)) return TW_STALE;
+    if (!lua_checkstack(L, 1)) return TW_NOSTACK;
+    lua_pushvalue(L, idx);
+    return TW_OK;
+}
