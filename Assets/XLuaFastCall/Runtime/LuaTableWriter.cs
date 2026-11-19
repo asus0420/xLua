@@ -117,6 +117,10 @@ namespace XLua
         {
             if (owner == IntPtr.Zero) throw new InvalidOperationException("Default Writer has no table.");
             int oldTop = LuaAPI.lua_gettop(owner);
+            // First push of an unregistered enum runs xLua's type registration,
+            // which pushes several values without checking the stack itself.
+            if (!LuaAPI.lua_checkstack(owner, 20))
+                throw new InvalidOperationException("Lua stack overflow while writing enum.");
             try
             {
                 // This follows xLua's existing protection boundary. Only Write's native

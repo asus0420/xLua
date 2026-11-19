@@ -114,11 +114,49 @@ typedef struct
     int count, required, strict, allowExtra, userdataOnly, types[INPUTS];
 } Method;
 static char key;
+static char context_mt_key, method_mt_key, group_mt_key;
+
+/* Distinct registry metatables tag our full userdata. No per-call allocation.
+   Debug access is not a security boundary: also reject undersized userdata. */
+static void create_private_mt(lua_State *L, const void *mtkey) {
+  lua_newtable(L);
+  lua_pushliteral(L, "XLuaFastCall private userdata");
+  lua_setfield(L, -2, "__metatable");
+  lua_rawsetp(L, LUA_REGISTRYINDEX, mtkey);
+}
+static void set_private_mt(lua_State *L, const void *mtkey) {
+  lua_rawgetp(L, LUA_REGISTRYINDEX, mtkey);
+  lua_setmetatable(L, -2);
+}
+static void *test_private_ud(lua_State *L, int index, const void *mtkey, size_t size) {
+  int matches;
+  index = lua_absindex(L, index);
+  if (lua_type(L, index) != LUA_TUSERDATA || lua_rawlen(L, index) != size ||
+      !lua_getmetatable(L, index)) return NULL;
+  lua_rawgetp(L, LUA_REGISTRYINDEX, mtkey);
+  matches = lua_rawequal(L, -1, -2);
+  lua_pop(L, 2);
+  return matches ? lua_touserdata(L, index) : NULL;
+}
+static void *check_private_ud(lua_State *L, int index, const void *mtkey, size_t size) {
+  void *ud = test_private_ud(L, index, mtkey, size);
+  if (!ud) luaL_error(L, "XLuaFastCall invalid closure userdata upvalue");
+  return ud;
+}
+static Context *check_context(lua_State *L) {
+  return (Context *)check_private_ud(L, lua_upvalueindex(1), &context_mt_key, sizeof(Context));
+}
+static void check_handle_field(lua_State *L) {
+  /* lua_isstring also accepts numbers; only an actual string is a field name. */
+  if (lua_type(L, lua_upvalueindex(3)) != LUA_TSTRING)
+    luaL_error(L, "XLuaFastCall invalid handle field upvalue");
+}
+
 static Context *find(lua_State *L)
 {
     Context *c;
     lua_rawgetp(L, LUA_REGISTRYINDEX, &key);
-    c = (Context *)lua_touserdata(L, -1);
+    c = (Context *)test_private_ud(L, -1, &context_mt_key, sizeof(Context));
     lua_pop(L, 1);
     return c;
 }
@@ -214,9 +252,8 @@ static void push_exception(lua_State *L, void *data)
     lua_concat(L, 2);
 }
 
-static int invoke_method(lua_State *L, Method *m)
+static int invoke_method(lua_State *L, Context *c, Method *m)
 {
-    Context *c = (Context *)lua_touserdata(L, lua_upvalueindex(1));
     int count = lua_gettop(L), i, status, d;
     int64_t receiver;
     Cell cells[INPUTS + OUTPUTS];
@@ -407,12 +444,23 @@ invalid:
 
 /* Single methods keep their own entry; only group entries scan overloads. */
 static int invoke(lua_State *L) {
-  return invoke_method(L, (Method *)lua_touserdata(L, lua_upvalueindex(2)));
+  Context *c = check_context(L);
+  Method *m = (Method *)check_private_ud(L, lua_upvalueindex(2), &method_mt_key, sizeof(Method));
+  check_handle_field(L);
+  return invoke_method(L, c, m);
 }
 typedef struct { int count; Method methods[1]; } MethodGroup;
 static int invoke_group(lua_State *L) {
-  MethodGroup *group = (MethodGroup *)lua_touserdata(L, lua_upvalueindex(2));
+  Context *c = check_context(L);
+  size_t bytes = lua_rawlen(L, lua_upvalueindex(2));
+  MethodGroup *group = (MethodGroup *)check_private_ud(L, lua_upvalueindex(2), &group_mt_key, bytes);
   int argc = lua_gettop(L) - 1, branch, i;
+  /* Check the allocation before reading the variable-length descriptor. */
+  if (bytes < offsetof(MethodGroup, methods) + 2 * sizeof(Method) ||
+      group->count < 2 || group->count > 1024 ||
+      bytes != offsetof(MethodGroup, methods) + (size_t)group->count * sizeof(Method))
+    return luaL_error(L, "XLuaFastCall invalid method group upvalue");
+  check_handle_field(L);
   for (branch = 0; branch < group->count; branch++) {
     Method *m = &group->methods[branch];
     if (argc != m->required) continue;
@@ -423,7 +471,7 @@ static int invoke_group(lua_State *L) {
       else if (kind == T_BOOL) { if (!ttisboolean(v)) break; }
       else if (!ttisnumber(v)) break;
     }
-    if (i == argc) return invoke_method(L, m);
+    if (i == argc) return invoke_method(L, c, m);
   }
   lua_pushvalue(L, lua_upvalueindex(4));
   return lua_error(L);
@@ -458,7 +506,11 @@ API int sd_open(lua_State *L)
         return -1;
     if (*lua_version(L) != 503 || find(L))
         return -1;
+    create_private_mt(L, &context_mt_key);
+    create_private_mt(L, &method_mt_key);
+    create_private_mt(L, &group_mt_key);
     c = (Context *)lua_newuserdata(L, sizeof(Context));
+    set_private_mt(L, &context_mt_key);
     memset(c, 0, sizeof(*c));
     lua_rawsetp(L, LUA_REGISTRYINDEX, &key);
     return 0;
@@ -481,6 +533,7 @@ static int install(lua_State *L, const char *name, Callback callback, const int 
             return -1;
     lua_rawgetp(L, LUA_REGISTRYINDEX, &key);
     m = (Method *)lua_newuserdata(L, sizeof(Method));
+    set_private_mt(L, &method_mt_key);
     memset(m, 0, sizeof(*m));
     m->callback = callback;
     m->count = count;
@@ -530,6 +583,7 @@ API int sd_install_group(lua_State *L, const char *name, const Callback *callbac
   }
   lua_rawgetp(L, LUA_REGISTRYINDEX, &key);
   group = (MethodGroup *)lua_newuserdata(L, offsetof(MethodGroup, methods) + branches * sizeof(Method));
+  set_private_mt(L, &group_mt_key);
   group->count = branches;
   for (b = 0; b < branches; b++) {
     Method *m = &group->methods[b];
@@ -584,7 +638,10 @@ API int xlua_tw_new(lua_State *L, int parent, const void *parent_ptr,
     if (L->ci == &L->base_ci || isLua(L->ci)) return TW_NO_CALLBACK;
     if (parent && !tw_valid(L, parent, parent_ptr)) return TW_STALE;
     if (array < 0 || hash < 0) return TW_BADARGS;
-    if (!lua_checkstack(L, 3)) return TW_NOSTACK;
+    /* The new table stays on the stack until the C# callback returns. Re-establish
+       the LUA_MINSTACK free slots that xLua wrappers, out-arg pushes and type
+       registration assume, instead of eroding them by one slot per table. */
+    if (!lua_checkstack(L, LUA_MINSTACK + 2)) return TW_NOSTACK;
     a.array = array; a.hash = hash;
     if (luaD_pcall(L, tw_do_new, &a, savestack(L, L->top), 0) != LUA_OK) return TW_LUAERR;
     *idx = lua_gettop(L); *ptr = lua_topointer(L, -1);

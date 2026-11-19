@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -42,7 +43,7 @@ namespace XLuaFastCall
         static bool Same(byte* a,byte* b,int len)
         {
             int k=0;
-            for(;k+8<=len;k+=8)if(*(ulong*)(a+k)!=*(ulong*)(b+k))return false;
+            for(;k+8<=len;k+=8)if(ReadUnaligned64(a+k)!=ReadUnaligned64(b+k))return false;
             for(;k<len;k++)if(a[k]!=b[k])return false;
             return true;
         }
@@ -51,7 +52,7 @@ namespace XLuaFastCall
         {
             if(len==0)return string.Empty;
             int k=0;
-            for(;k+8<=len;k+=8)if((*(ulong*)(data+k)&0x8080808080808080UL)!=0)return DecodeNonAscii(data,len);
+            for(;k+8<=len;k+=8)if((ReadUnaligned64(data+k)&0x8080808080808080UL)!=0)return DecodeNonAscii(data,len);
             for(;k<len;k++)if(data[k]>=0x80)return DecodeNonAscii(data,len);
             string s=new string('\0',len);
             fixed(char* p=s)for(k=0;k<len;k++)p[k]=(char)data[k];
@@ -95,12 +96,28 @@ namespace XLuaFastCall
         {
             int k=0;
             for(;k+4<=len;k+=4) {
-                ulong c=*(ulong*)(s+k);
+                ulong c=ReadUnaligned64(s+k);
                 if((c&0xFF80FF80FF80FF80UL)!=0)break;
-                *(uint*)(o+k)=(uint)(c&0xFF)|(uint)((c>>8)&0xFF00)|(uint)((c>>16)&0xFF0000)|(uint)((c>>24)&0xFF000000);
+                WriteUnaligned32(o+k,(uint)(c&0xFF)|(uint)((c>>8)&0xFF00)|(uint)((c>>16)&0xFF0000)|(uint)((c>>24)&0xFF000000));
             }
             for(;k<len && s[k]<0x80;k++)o[k]=(byte)s[k];
             return k;
+        }
+
+        // Lua bytes, managed UTF-16 data and buffer+used do not promise word alignment.
+        // Copy through aligned locals instead of dereferencing ulong*/uint* at those
+        // addresses. MemoryCopy supports byte-aligned buffers on Mono and IL2CPP.
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static ulong ReadUnaligned64(void* source)
+        {
+            ulong value;
+            Buffer.MemoryCopy(source,&value,sizeof(ulong),sizeof(ulong));
+            return value;
+        }
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static void WriteUnaligned32(void* destination,uint value)
+        {
+            Buffer.MemoryCopy(&value,destination,sizeof(uint),sizeof(uint));
         }
 
         const string LUADLL=NativeAbi.Library;
