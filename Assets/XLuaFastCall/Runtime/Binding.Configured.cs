@@ -24,19 +24,15 @@ namespace XLuaFastCall
             // 先确保原 XLua Wrap 已注册，之后才能取得其方法表。
             int typeId = translator.GetTypeId(env.L, type);
 
-            using (var root = env.Global.Get<LuaTable>("XLuaFastCall"))
             using (var fast = env.NewTable())
             {
-                root.Set(name, fast);
+                configuredRoot.Set(name, fast);
+                LuaAPI.xlua_rawgeti(env.L, LuaIndexes.LUA_REGISTRYINDEX, typeId);
+                var meta = translator.GetObject(env.L, -1, typeof(LuaTable)) as LuaTable;
+                LuaAPI.lua_pop(env.L, 1);
 
-                using (var register = root.Get<LuaFunction>("_RegisterType"))
-                {
-                    LuaAPI.xlua_rawgeti(env.L, LuaIndexes.LUA_REGISTRYINDEX, typeId);
-                    var meta = translator.GetObject(env.L, -1, typeof(LuaTable)) as LuaTable;
-                    LuaAPI.lua_pop(env.L, 1);
-                    using (meta)
-                        register.Call(meta, name, fast, string.Join("\n", methods));
-                }
+                using (meta)
+                    configuredRegisterType.Call(meta, name, fast, string.Join("\n", methods));
 
                 // 将优化方法表压栈，后续 sd_install 把原生入口写入此表。
                 translator.Push(env.L, fast);

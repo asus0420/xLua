@@ -43,25 +43,36 @@ namespace XLuaFastCallEditor
 
         public static string UnsupportedReason(MethodInfo m)
         {
-            if (!m.IsPublic || m.IsGenericMethod || m.IsSpecialName || m.IsStatic)
-                return "non-public/generic/static/special method";
+            if (!m.IsPublic)
+                return "方法不是 public，FastCall 只支持公开实例方法";
+
+            if (m.IsGenericMethod)
+                return "不支持泛型方法";
+
+            if (m.IsSpecialName)
+                return "不支持特殊名称方法（属性访问器、运算符等）";
+
+            if (m.IsStatic)
+                return "不支持静态方法，FastCall 只支持实例方法";
 
             if (m.IsDefined(typeof(XLua.BlackListAttribute), true))
-                return "XLua BlackList";
+                return "方法带有 XLua BlackList 特性，不能导出";
 
             var ps = m.GetParameters();
+            foreach (var p in ps)
+            {
+                if (p.IsDefined(typeof(ParamArrayAttribute), false))
+                    return "参数 " + p.Name + " 使用 params，不支持可变参数";
 
-            if (ps.Any(p => p.IsDefined(typeof(ParamArrayAttribute), false)))
-                return "params parameters";
+                if (p.IsIn && p.ParameterType.IsByRef)
+                    return "参数 " + p.Name + " 使用 in，不支持只读引用参数";
 
-            if (ps.Any(p => p.IsIn && p.ParameterType.IsByRef))
-                return "in parameters";
+                if (p.IsOptional && p.ParameterType.IsByRef)
+                    return "参数 " + p.Name + " 是可选引用参数，不支持此声明";
 
-            if (ps.Any(p => p.IsOptional && p.ParameterType.IsByRef))
-                return "optional byref parameter";
-
-            if (ps.Any(p => p.IsOptional && !p.HasDefaultValue))
-                return "optional parameter without default value";
+                if (p.IsOptional && !p.HasDefaultValue)
+                    return "可选参数 " + p.Name + " 缺少默认值";
+            }
 
             bool optionalSeen = false;
             foreach (var p in ps.Where(p => !p.IsOut))
@@ -69,17 +80,24 @@ namespace XLuaFastCallEditor
                 if (p.IsOptional)
                     optionalSeen = true;
                 else if (optionalSeen)
-                    return "required input after optional parameter";
+                    return "必填参数 " + p.Name + " 位于可选参数之后";
             }
 
-            if ((m.ReturnType != typeof(void) && !Supported(m.ReturnType)) || ps.Any(p => !Supported(ValueType(p))))
-                return "unsupported type (only int, byte, long, float, double, bool, string; Vector and enum signatures must use explicit numeric interfaces)";
+            const string supportedTypes = "仅支持 int、byte、long、float、double、bool、string；Vector 和枚举请使用显式数值接口";
+            if (m.ReturnType != typeof(void) && !Supported(m.ReturnType))
+                return "返回值类型 " + m.ReturnType + " 不支持；" + supportedTypes;
 
-            if (ps.Count(p => !p.IsOut) > XLuaFastCall.Binding.MaxInputs)
-                return "more than " + XLuaFastCall.Binding.MaxInputs + " input slots";
+            var unsupportedParameters = ps.Where(p => !Supported(ValueType(p))).ToArray();
+            if (unsupportedParameters.Length > 0)
+                return "参数类型不支持：" + string.Join("；", unsupportedParameters.Select(p => p.Name + " (" + p.ParameterType + ")")) + "；" + supportedTypes;
 
-            if ((m.ReturnType == typeof(void) ? 0 : 1) + ps.Count(p => p.ParameterType.IsByRef) > XLuaFastCall.Binding.MaxOutputs)
-                return "more than " + XLuaFastCall.Binding.MaxOutputs + " output slots";
+            int inputs = ps.Count(p => !p.IsOut);
+            if (inputs > XLuaFastCall.Binding.MaxInputs)
+                return "输入槽位数 " + inputs + " 超过上限 " + XLuaFastCall.Binding.MaxInputs;
+
+            int outputs = (m.ReturnType == typeof(void) ? 0 : 1) + ps.Count(p => p.ParameterType.IsByRef);
+            if (outputs > XLuaFastCall.Binding.MaxOutputs)
+                return "输出槽位数 " + outputs + " 超过上限 " + XLuaFastCall.Binding.MaxOutputs + "（返回值及 ref/out 参数均计入）";
 
             return null;
         }
@@ -321,22 +339,39 @@ namespace XLuaFastCallEditor
                 foreach (var group in allGroups.Where(g => g.Methods.Any(selected.Contains)))
                 {
                     var missing = group.Methods.Where(m => !selected.Contains(m)).ToArray();
-                    var unsupported = group.Methods.Select(m => new { Method = m, Reason = UnsupportedReason(m) }).Where(x => x.Reason != null).ToArray();
-
-                    if (group.IsStatic || missing.Length > 0 || unsupported.Length > 0 || group.Branches.Count > 1024)
+                    if (missing.Length > 0)
                     {
-                        decisions.Add("SKIP " + type.FullName + "." + group.Name + " | entire group retains original Wrap | " +
-                            (group.IsStatic ? "static group; " : "") + (group.Branches.Count > 1024 ? "more than 1024 branches; " : "") +
-                            string.Join("; ", missing.Select(m => "not selected: " + m).Concat(unsupported.Select(x => x.Method + ": " + x.Reason))));
-                        continue;
+                        throw new InvalidOperationException(
+                            "XLuaFastCall 生成失败：同名的重载函数必须保持一致，要么全部添加 [XLuaFastCall] 特性，要么全部不添加。\n" +
+                            "重载函数：" + type.FullName + "." + group.Name);
+                    }
+
+                    var unsupported = group.Methods.Select(m => new { Method = m, Reason = UnsupportedReason(m) }).Where(x => x.Reason != null).ToArray();
+                    if (group.IsStatic || unsupported.Length > 0 || group.Branches.Count > 1024)
+                    {
+                        throw new InvalidOperationException(
+                            "XLuaFastCall 生成失败：已添加 [XLuaFastCall] 的重载组不满足生成条件。\n" +
+                            "重载组：" + type.FullName + "." + group.Name + "\n" +
+                            (group.IsStatic ? "原因：不支持静态方法组。\n" : "") +
+                            (group.Branches.Count > 1024 ? "原因：重载分支数 " + group.Branches.Count + " 超过上限 1024（包含可选参数展开的分支）。\n" : "") +
+                            "该组方法：\n" + string.Join("\n", group.Methods.Select(m => "  " + m.DeclaringType.FullName + "." + m)) + "\n" +
+                            string.Join("\n", unsupported.Select(x => "不支持的方法：" + x.Method.DeclaringType.FullName + "." + x.Method + "；原因：" + x.Reason)) + "\n" +
+                            "请修正上述声明，或移除该组所有 [XLuaFastCall] 特性以使用普通 XLua Wrap。");
                     }
 
                     groups.Add(group);
                     decisions.Add("FAST " + type.FullName + "." + group.Name + " | branches=" + group.Branches.Count);
                 }
 
-                foreach (var m in selected.Where(m => !allGroups.Any(g => g.Methods.Contains(m))))
-                    decisions.Add("SKIP " + type.FullName + "." + m.Name + " | not exported by xLua: " + m);
+                var notExported = selected.Where(m => !allGroups.Any(g => g.Methods.Contains(m))).ToArray();
+                if (notExported.Length > 0)
+                {
+                    throw new InvalidOperationException(
+                        "XLuaFastCall 生成失败：以下方法已添加 [XLuaFastCall]，但未进入 XLua 导出方法组，无法生成 FastCall。\n" +
+                        string.Join("\n", notExported.Select(m => "  " + m.DeclaringType.FullName + "." + m + "；原因：" +
+                            (UnsupportedReason(m) ?? "被 XLua 导出规则过滤，请检查 BlackList 配置及方法导出配置"))) + "\n" +
+                        "请修正导出配置或方法声明，或移除对应的 [XLuaFastCall] 特性。");
+                }
 
                 var methods = groups.SelectMany(g => g.Methods).Distinct().ToList();
                 if (options.LuaOutputDirectory != null)
@@ -441,7 +476,7 @@ namespace XLuaFastCallEditor
             }
 
             File.WriteAllLines(Path.Combine(output, "generation-decisions.txt"), decisions, new UTF8Encoding(false));
-            Debug.Log("XLuaFastCall Generate finished: " + output + "; skipped groups/signatures: " + decisions.Count(x => x.StartsWith("SKIP ")));
+            Debug.Log("XLuaFastCall Generate finished: " + output + "; generated groups: " + decisions.Count);
         }
 
         const string LuaHeader = "-- Generated by XLuaFastCallEditor.XLuaFastCallGenerator.\n";
@@ -454,11 +489,12 @@ namespace XLuaFastCallEditor
                 throw new ArgumentNullException();
 
             var b = new StringBuilder(LuaHeader);
-            b.AppendLine("local fast = XLuaFastCall[" + LuaQuote(type.Name) + "]");
+            b.AppendLine("return function(fast)");
             b.AppendLine("return {");
             foreach (var method in methods.GroupBy(m => m.Name).Select(g => g.First()).OrderBy(m => m.Name, StringComparer.Ordinal))
                 b.AppendLine("    [" + LuaQuote(method.Name) + "] = fast[" + LuaQuote(method.Name) + "],");
             b.AppendLine("}");
+            b.AppendLine("end");
             return b.ToString();
         }
 
