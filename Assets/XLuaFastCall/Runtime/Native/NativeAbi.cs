@@ -1,26 +1,33 @@
-using System;
 using System.Runtime.InteropServices;
 
 namespace XLuaFastCall
 {
     internal static unsafe class NativeAbi
     {
+        [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int sd_layout([Out] int[] values);
+
 #if (UNITY_IOS || UNITY_IPHONE || UNITY_TVOS || UNITY_WEBGL || UNITY_SWITCH) && !UNITY_EDITOR
         internal const string Library = "__Internal";
 #else
         internal const string Library = "xlua";
 #endif
+
         [StructLayout(LayoutKind.Explicit, Size = 16)]
         internal struct Slot
         {
             [FieldOffset(0)]
             public long Integer;
+
             [FieldOffset(0)]
             public double Number;
+
             [FieldOffset(0)]
             public ulong Address;
+
             [FieldOffset(8)]
             public int Tag;
+
             [FieldOffset(12)]
             public int Length;
         }
@@ -30,12 +37,16 @@ namespace XLuaFastCall
         {
             [FieldOffset(0)]
             public long Integer;
+
             [FieldOffset(0)]
             public double Number;
+
             [FieldOffset(0)]
             public ulong Address;
+
             [FieldOffset(8)]
             public long Kind;
+
             [FieldOffset(16)]
             public long Size;
         }
@@ -48,37 +59,56 @@ namespace XLuaFastCall
             public Cell* Cells;
             public byte* Error;
             public int Count;
+
             // 与 C 端显式补齐一致，统一 32 位 GCC 和 MSVC 的 Frame 大小。
             public int Reserved;
         }
 
-        // 与 bridge.c 的 L_* / S_* 一一对应。
-        const int LayoutSlot = 0, LayoutSlotTag = 1, LayoutCell = 2, LayoutSlotLength = 3, LayoutFrameCells = 4,
-                  LayoutFrameCount = 5, LayoutFrameError = 6, LayoutCellKind = 7, LayoutCellSize = 8, LayoutReservedToken = 9,
-                  LayoutFrame = 10, LayoutFrameReceiver = 11, LayoutCount = 12;
+        // 与 lua_fast_call_bridge.c 的 L_* 布局索引一一对应。
+        private enum LayoutIndex
+        {
+            Slot = 0,
+            SlotTag = 1,
+            Cell = 2,
+            SlotLength = 3,
+            FrameCells = 4,
+            FrameCount = 5,
+            FrameError = 6,
+            CellKind = 7,
+            CellSize = 8,
+            ReservedToken = 9,
+            Frame = 10,
+            FrameReceiver = 11,
+            Count = 12
+        }
+
         internal const int BufferAbiVersion = 1009;
-        internal const int TagFloat = 3, TagInteger = 19;
-        internal const int Inputs = 32, Outputs = 16, ErrorBytes = 4096;
-        [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
-        static extern int sd_layout([Out] int[] values);
+        internal const int TagFloat = 3;
+        internal const int TagInteger = 19;
+        internal const int Inputs = 32;
+        internal const int Outputs = 16;
+        internal const int ErrorBytes = 4096;
+
         // 固定 12 项容量兼容旧查询入口；先返回版本，再校验当前布局。
         internal static bool Matches()
         {
-            var layout = new int[LayoutCount];
+            var layout = new int[(int)LayoutIndex.Count];
+
             int Off(string field) => (int)Marshal.OffsetOf(typeof(Frame), field);
+
             return sd_layout(layout) == BufferAbiVersion
-                && layout[LayoutSlot] == sizeof(Slot)
-                && layout[LayoutSlotTag] == 8
-                && layout[LayoutSlotLength] == 12
-                && layout[LayoutCell] == sizeof(Cell)
-                && layout[LayoutCellKind] == 8
-                && layout[LayoutCellSize] == 16
-                && layout[LayoutFrame] == sizeof(Frame)
-                && layout[LayoutFrameReceiver] == Off(nameof(Frame.Receiver))
-                && layout[LayoutFrameCells] == Off(nameof(Frame.Cells))
-                && layout[LayoutFrameError] == Off(nameof(Frame.Error))
-                && layout[LayoutFrameCount] == Off(nameof(Frame.Count))
-                && layout[LayoutReservedToken] == 0;
+                && layout[(int)LayoutIndex.Slot] == sizeof(Slot)
+                && layout[(int)LayoutIndex.SlotTag] == 8
+                && layout[(int)LayoutIndex.SlotLength] == 12
+                && layout[(int)LayoutIndex.Cell] == sizeof(Cell)
+                && layout[(int)LayoutIndex.CellKind] == 8
+                && layout[(int)LayoutIndex.CellSize] == 16
+                && layout[(int)LayoutIndex.Frame] == sizeof(Frame)
+                && layout[(int)LayoutIndex.FrameReceiver] == Off(nameof(Frame.Receiver))
+                && layout[(int)LayoutIndex.FrameCells] == Off(nameof(Frame.Cells))
+                && layout[(int)LayoutIndex.FrameError] == Off(nameof(Frame.Error))
+                && layout[(int)LayoutIndex.FrameCount] == Off(nameof(Frame.Count))
+                && layout[(int)LayoutIndex.ReservedToken] == 0;
         }
     }
 }
