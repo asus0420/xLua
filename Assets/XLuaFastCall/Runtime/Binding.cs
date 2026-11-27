@@ -46,8 +46,11 @@ namespace XLuaFastCall
             this.env = env;
             translator = ObjectTranslatorPool.Instance.Find(env.L);
 
+            if (translator == null)
+                throw new InvalidOperationException($"[{nameof(Binding)}.ctor] XLuaFastCall requires ObjectTranslator to be present");
+
             if (!NativeAbi.Matches())
-                throw new InvalidOperationException("XLuaFastCall buffer ABI mismatch (rebuild xlua native library)");
+                throw new InvalidOperationException($"[{nameof(Binding)}.ctor] XLuaFastCall buffer ABI mismatch (rebuild xlua native library)");
 
             LuaStringCodec.Initialize();
             bool opened = false;
@@ -55,7 +58,7 @@ namespace XLuaFastCall
             try
             {
                 if (sd_open(env.L) != 0)
-                    throw new InvalidOperationException("XLuaFastCall open failed");
+                    throw new InvalidOperationException($"[{nameof(Binding)}.ctor] XLuaFastCall open failed");
 
                 opened = true;
                 int installed = 0;
@@ -63,7 +66,7 @@ namespace XLuaFastCall
                 ConfiguredGenerationPresent(ref generated);
 
                 if (!generated)
-                    throw new InvalidOperationException("Run XLua/Generate Code before creating a configured binding");
+                    throw new InvalidOperationException($"[{nameof(Binding)}.ctor] Run XLua/Generate Code before creating a configured binding");
 
                 configuredRoot = root;
                 configuredRegisterType = registerType;
@@ -95,7 +98,7 @@ namespace XLuaFastCall
         void Register(string name, Callback cb, int[] kinds, int required, string handleField = "handle", string strictName = null)
         {
             if (sd_install(env.L, name, Marshal.GetFunctionPointerForDelegate(cb), kinds, kinds.Length, required, handleField, strictName) != 0)
-                throw new InvalidOperationException("Registration failed: " + name);
+                throw new InvalidOperationException($"[{nameof(Binding)}.{nameof(Register)}] Registration failed: {strictName ?? name}");
         }
 
         // 生成的代理入口不接受整数注册表句柄作为 self。
@@ -103,17 +106,17 @@ namespace XLuaFastCall
             string handleField = "handle", string strictName = null, bool userdataOnly = true)
         {
             if (!userdataOnly)
-                throw new ArgumentException("Proxy registrations require userdata self", nameof(userdataOnly));
+                throw new ArgumentException($"[{nameof(Binding)}.{nameof(Register)}] Proxy registrations require userdata self: {strictName ?? name}", nameof(userdataOnly));
 
             if (sd_install_proxy(env.L, name, Marshal.GetFunctionPointerForDelegate(cb), kinds, kinds.Length,
                 required, allowExtra ? 1 : 0, handleField, strictName) != 0)
-                throw new InvalidOperationException("Registration failed: " + name);
+                throw new InvalidOperationException($"[{nameof(Binding)}.{nameof(Register)}] Registration failed: {strictName ?? name}");
         }
 
         void RegisterGroup(string name, Callback[] callbacks, int[][] kinds, int[] arities, string strictName)
         {
             if (callbacks.Length != kinds.Length || kinds.Length != arities.Length)
-                throw new ArgumentException("Group descriptor count mismatch");
+                throw new ArgumentException($"[{nameof(Binding)}.{nameof(RegisterGroup)}] Group descriptor count mismatch: {strictName ?? name}");
 
             var pointers = new IntPtr[callbacks.Length];
             var counts = new int[callbacks.Length];
@@ -122,7 +125,7 @@ namespace XLuaFastCall
             for (int i = 0; i < callbacks.Length; i++)
             {
                 if (kinds[i].Length > MaxInputs)
-                    throw new ArgumentException("Too many group inputs");
+                    throw new ArgumentException($"[{nameof(Binding)}.{nameof(RegisterGroup)}] Too many group inputs: {strictName ?? name} (branch: {i})");
 
                 pointers[i] = Marshal.GetFunctionPointerForDelegate(callbacks[i]);
                 counts[i] = kinds[i].Length;
@@ -130,7 +133,7 @@ namespace XLuaFastCall
             }
 
             if (sd_install_group(env.L, name, pointers, counts, arities, flat, callbacks.Length, "handle", strictName) != 0)
-                throw new InvalidOperationException("Group registration failed: " + name);
+                throw new InvalidOperationException($"[{nameof(Binding)}.{nameof(RegisterGroup)}] Group registration failed: {strictName ?? name}");
         }
 
         // 仅在对象池开始新一轮使用时清除缓存；常规调用不进入此方法。
@@ -142,7 +145,7 @@ namespace XLuaFastCall
             Check();
 
             if (receiver == null)
-                throw new ArgumentNullException(nameof(receiver));
+                throw new ArgumentNullException(nameof(receiver), $"[{nameof(Binding)}.{nameof(ResetReceiver)}] Receiver cannot be null");
 
             int top = XLua.LuaDLL.Lua.lua_gettop(env.L);
 
@@ -151,7 +154,7 @@ namespace XLuaFastCall
                 translator.Push(env.L, receiver);
 
                 if (sd_reset_receiver(env.L, -1) != 0)
-                    throw new InvalidOperationException("XLuaFastCall Proxy uservalue is already in use or receiver is not userdata");
+                    throw new InvalidOperationException($"[{nameof(Binding)}.{nameof(ResetReceiver)}] XLuaFastCall Proxy uservalue is already in use or receiver is not userdata: {receiver.GetType().FullName}");
             }
             finally
             {
@@ -162,10 +165,10 @@ namespace XLuaFastCall
         void Check()
         {
             if (closed)
-                throw new ObjectDisposedException(nameof(Binding));
+                throw new ObjectDisposedException(nameof(Binding), $"[{nameof(Binding)}.{nameof(Check)}] Binding has been disposed");
 
             if (thread != System.Threading.Thread.CurrentThread.ManagedThreadId)
-                throw new InvalidOperationException("Use owning Lua thread");
+                throw new InvalidOperationException($"[{nameof(Binding)}.{nameof(Check)}] Use owning Lua thread");
         }
 
         public void Dispose()
@@ -176,7 +179,7 @@ namespace XLuaFastCall
             Check();
 
             if (sd_close(env.L) != 0)
-                throw new InvalidOperationException("Active callback");
+                throw new InvalidOperationException($"[{nameof(Binding)}.{nameof(Dispose)}] Cannot close binding while a callback is active");
 
             closed = true;
             LuaStringCodec.ReleaseScratch();

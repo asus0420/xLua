@@ -490,10 +490,10 @@ namespace XLuaFastCallEditor
 
             var b = new StringBuilder(LuaHeader);
             b.AppendLine("return function(fast)");
-            b.AppendLine("return {");
+            b.AppendLine("    return {");
             foreach (var method in methods.GroupBy(m => m.Name).Select(g => g.First()).OrderBy(m => m.Name, StringComparer.Ordinal))
-                b.AppendLine("    [" + LuaQuote(method.Name) + "] = fast[" + LuaQuote(method.Name) + "],");
-            b.AppendLine("}");
+                b.AppendLine("        [" + LuaQuote(method.Name) + "] = fast[" + LuaQuote(method.Name) + "],");
+            b.AppendLine("    }");
             b.AppendLine("end");
             return b.ToString();
         }
